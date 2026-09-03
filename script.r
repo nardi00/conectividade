@@ -36,7 +36,6 @@ NOMES <- c("ITUB4", "BBDC4", "BBAS3", "SANB11",
 DATA_INICIO <- "2019-01-01"
 DATA_FIM    <- "2025-12-31"
 
-N_JANELA_YZ   <- 21
 N_JANELA_W    <- 200
 H_HORIZONTE   <- 10
 P_LAGS        <- 2
@@ -205,43 +204,38 @@ if (nrow(relatorio_outliers) > 0) {
 
 
 # ==============================================================================
-# SEÇÃO 5 — ESTIMAÇÃO DA VOLATILIDADE DE YANG-ZHANG
+# SEÇÃO 5 — ESTIMAÇÃO DA VOLATILIDADE Rogers-Satchell + Overnight...
 # ==============================================================================
 
-cat("\n[5/10] Estimando volatilidade Yang-Zhang (n = 21 dias úteis)...\n")
+cat("\n[5/10] Estimando volatilidade Rogers-Satchell + Overnight...\n")
 
-# Implementação própria (Eq. 6.1-6.5), tolerante a NA: TTR::volatility() quebra 
-# com NA fora do início da série ("Series contains non-leading NAs").
-yang_zhang_na <- function(ohlc_mat, n = 21) {
+rogers_satchell_overnight <- function(ohlc_mat, n = 21) {
   O <- as.numeric(ohlc_mat[, "Open"])
   H <- as.numeric(ohlc_mat[, "High"])
   L <- as.numeric(ohlc_mat[, "Low"])
   C <- as.numeric(ohlc_mat[, "Close"])
   C_lag <- c(NA_real_, C[-length(C)])
+ 
+  overnight2 <- (log(O/C_lag))^2
+  rs <- log(H / C) * log(H / O) + log(L / C) * log(L / O)
   
-  Nt  <- length(C)
-  out <- rep(NA_real_, Nt)
-  k   <- 0.34 / (1.34 + (n + 1) / (n - 1))   # Eq. 6.5
+  sig2 <- overnight2 + rs
+  sig2[!is.na(sig2) & sig2 < 0] <- NA
   
-  for (i in n:Nt) {
-    idx <- (i - n + 1):i
-    o <- O[idx]; h <- H[idx]; l <- L[idx]; c <- C[idx]; cl <- C_lag[idx]
-    if (anyNA(c(o, h, l, c, cl))) next
-    
-    ro <- log(o / cl)                                            # Eq. 6.2
-    rc <- log(c / o)                                              # Eq. 6.3
-    rs <- log(h / c) * log(h / o) + log(l / c) * log(l / o)       # Eq. 6.4
-    
-    sig2_o  <- sum((ro - mean(ro))^2) / (n - 1)
-    sig2_c  <- sum((rc - mean(rc))^2) / (n - 1)
-    sig2_rs <- sum(rs) / (n - 1)
-    sig2_yz <- sig2_o + k * sig2_c + (1 - k) * sig2_rs             # Eq. 6.1
-    out[i]  <- sqrt(sig2_yz)
-  }
-  out
+  
+  sqrt(sig2)
 }
 
-vol_yz <- list()
+# Apêndice (não usado na especificação principal, mantido para a tabela
+# comparativa do Feedback 3): Garman-Klass, convenção Diebold-Yilmaz.
+# garman_klass <- function(ohlc_mat) {
+#   O <- as.numeric(ohlc_mat[, "Open"]); H <- as.numeric(ohlc_mat[, "High"])
+#   L <- as.numeric(ohlc_mat[, "Low"]);  C <- as.numeric(ohlc_mat[, "Close"])
+#   sig2 <- 0.5 * (log(H / L))^2 - (2 * log(2) - 1) * (log(C / O))^2
+#   sqrt(pmax(sig2, 0))
+# }
+
+vol_rs <- list()
 
 for (nome in NOMES) {
   d <- dados_adj[[nome]]
@@ -250,19 +244,15 @@ for (nome in NOMES) {
   n_nas <- sum(is.na(ohlc_mat))
   if (n_nas > 0) cat(" ", nome, ":", n_nas, "NAs no OHLC\n")
   
-  ohlc_imp <- ohlc_mat
-
+  sd_diario <- rogers_satchell_overnight(ohlc_mat)
+  vol_anual  <- sd_diario * sqrt(252)
+  vol_rs[[nome]] <- xts(vol_anual, order.by = index(d))
   
-  sd_diario  <- yang_zhang_na(ohlc_imp, n = N_JANELA_YZ)
-  vyz        <- sd_diario * sqrt(252)
-  vyz_mensal <- vyz / sqrt(252 / N_JANELA_YZ)
-  vol_yz[[nome]] <- xts(vyz_mensal, order.by = index(d))
-  
-  n_nas_vol <- sum(is.na(vyz_mensal))
+  n_nas_vol <- sum(is.na(vol_anual))
   if (n_nas_vol > 0) cat("   ", nome, "→", n_nas_vol, "NAs na volatilidade estimada\n")
 }
 
-cat("OK - volatilidade Yang-Zhang estimada para", length(vol_yz), "séries.\n")
+cat("OK - volatilidade Rogers-Satchell + Overnight estimada para", length(vol_rs), "séries.\n")
 
 
 # ==============================================================================
