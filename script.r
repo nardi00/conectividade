@@ -1,7 +1,7 @@
 # install.packages(c(
 #   "readxl", "TTR", "xts", "zoo", "imputeTS", "urca", "tseries", "FinTS",
-#   "vars", "igraph", "ggraph", "tidygraph", "ggplot2", "dplyr", "tidyr",
-#   "scales", "patchwork", "ConnectednessApproach"
+#   "fracdiff", "vars", "igraph", "ggraph", "tidygraph", "ggplot2", "dplyr",
+#   "tidyr", "scales", "patchwork", "ConnectednessApproach"
 # ))
 
 options(xts.warn_dplyr_breaks_lag = FALSE)
@@ -14,6 +14,7 @@ library(imputeTS)
 library(urca)
 library(tseries)
 library(FinTS)
+library(fracdiff)
 library(ConnectednessApproach)
 library(vars)
 library(igraph)
@@ -27,7 +28,7 @@ library(scales)
 dir.create("outputs/tabelas",  recursive = TRUE, showWarnings = FALSE)
 dir.create("outputs/graficos", recursive = TRUE, showWarnings = FALSE)
 
-# Constantes globais
+# ── Constantes globais ────────────────────────────────────────────────────
 CAMINHO_EXCEL <- "Cotacoes_ComDinheiro_8bancos_2014-2026.xlsx"
 
 NOMES <- c("ITUB4", "BBDC4", "BBAS3", "SANB11",
@@ -39,7 +40,7 @@ DATA_FIM    <- "2025-12-31"
 N_JANELA_W    <- 200
 H_HORIZONTE   <- 10
 P_LAGS        <- 2
-THRESHOLD_REL <- 0.05   
+THRESHOLD_REL <- 0.05   # threshold relativo do grafo NET colapsado (Seção 14)
 
 EVENTOS <- data.frame(
   data  = as.Date(c("2020-03-11", "2022-01-01", "2023-01-12", "2024-10-01")),
@@ -48,7 +49,7 @@ EVENTOS <- data.frame(
 )
 
 # ==============================================================================
-# LEITURA DOS DADOS (EXCEL)
+# SEÇÃO 1 — LEITURA DOS DADOS (EXCEL)
 # ==============================================================================
 
 cat("\n[1/11] Lendo cotações do arquivo Excel (ComDinheiro)...\n")
@@ -83,7 +84,7 @@ for (nome in NOMES) {
   dados_adj[[nome]] <- ohlc_adj
 }
 
-cat("OK -", length(dados_adj), "séries lidas.\n")
+cat("  OK —", length(dados_adj), "séries lidas.\n")
 
 for (nome in NOMES) {
   d <- dados_adj[[nome]]
@@ -100,8 +101,8 @@ for (nome in NOMES) {
 
 cat("\n[2/11] Verificando consistência OHLC...\n")
 
-# tolerância numérica: sem ela, ruído de ponto flutuante (~1e-9) do
-# cálculo do fator de ajuste do ComDinheiro é lido como violação.
+# EPS: tolerância numérica — sem ela, ruído de ponto flutuante (~1e-9) do
+# cálculo do fator de ajuste do ComDinheiro é lido como violação real.
 EPS <- 1e-6
 
 for (nome in NOMES) {
@@ -120,7 +121,7 @@ for (nome in NOMES) {
   }
 }
 
-cat("OK - sanity checks concluídos.\n")
+cat("  OK - sanity checks concluídos.\n")
 
 
 # ==============================================================================
@@ -129,7 +130,7 @@ cat("OK - sanity checks concluídos.\n")
 
 cat("\n[3/11] Aplicando filtro de liquidez...\n")
 
-# Sem volume em quantidade de ações no ComDinheiro, só piso de volume financeiro.
+# Sem volume em quantidade de ações no ComDinheiro — só piso de volume financeiro.
 VOLUME_MIN_BRL <- 100000
 
 for (nome in NOMES) {
@@ -144,7 +145,7 @@ for (nome in NOMES) {
   }
 }
 
-cat("OK - filtro de liquidez aplicado.\n")
+cat("  OK — filtro de liquidez aplicado.\n")
 
 
 # ==============================================================================
@@ -176,53 +177,66 @@ for (nome in NOMES) {
 }
 
 if (nrow(relatorio_outliers) > 0) {
-  cat("\nOutliers identificados (|z| > 5):\n")
+  cat("\n  Outliers identificados (|z| > 5):\n")
   print(relatorio_outliers[order(relatorio_outliers$data), ])
+  write.csv(relatorio_outliers, "outputs/tabelas/outliers_para_revisao.csv", row.names = FALSE)
   
+  # Regra da Seção 6.1.3, item 4: >=2 bancos na mesma data = evento sistêmico
+  # (mantém); 1 banco só = precisa de verificação externa. Apenas relatório —
+  # não altera dados_adj.
   n_por_data <- table(relatorio_outliers$data)
   relatorio_outliers$n_bancos_na_data <- as.integer(n_por_data[as.character(relatorio_outliers$data)])
   relatorio_outliers$classificacao <- ifelse(
     relatorio_outliers$n_bancos_na_data >= 2,
-    "Sistêmico (>=2 bancos na data)",
-    "ISOLADO (1 banco na data)"
+    "Sistêmico (>=2 bancos na data) — manter sem checagem adicional",
+    "ISOLADO (1 banco na data) — verificar em fonte externa"
   )
   
   isolados <- relatorio_outliers[relatorio_outliers$n_bancos_na_data == 1, ]
   isolados <- isolados[order(isolados$data), ]
   
-  cat("\nResumo da classificação automática:\n")
+  cat("\n  Resumo da classificação automática:\n")
   cat("   ", sum(relatorio_outliers$n_bancos_na_data >= 2), "linha(s) em datas sistêmicas (>=2 bancos)\n")
-  cat("   ", nrow(isolados), "linha(s) ISOLADAS - precisam de verificação externa:\n")
+  cat("   ", nrow(isolados), "linha(s) ISOLADAS — precisam de verificação externa:\n")
   print(isolados[, c("banco", "data", "retorno", "z_score")], row.names = FALSE)
   
   write.csv(relatorio_outliers, "outputs/tabelas/outliers_classificados.csv", row.names = FALSE)
-  cat("\nTabela classificada salva em outputs/tabelas/outliers_classificados.csv\n")
+  cat("\n  Tabela classificada salva em outputs/tabelas/outliers_classificados.csv\n")
 } else {
-  cat("Nenhum outlier com |z| > 5 encontrado.\n")
+  cat("  Nenhum outlier com |z| > 5 encontrado.\n")
 }
 
 
 # ==============================================================================
-# SEÇÃO 5 — ESTIMAÇÃO DA VOLATILIDADE Rogers-Satchell + Overnight...
+# SEÇÃO 5 — ESTIMAÇÃO DA VOLATILIDADE: ROGERS-SATCHELL + OVERNIGHT
 # ==============================================================================
+# Yang-Zhang (janela de 21 dias) substituído por Rogers-Satchell + termo
+# overnight, estimador de 1 dia sem sobreposição (Feedback 3, Seção 3.1).
+# A janela de 21 dias atualizada diariamente fazia observações consecutivas
+# compartilharem 20 de 21 dias, o que induzia autocorrelação mecânica de
+# ~-0,42 na defasagem 21 (não fato econômico) — isso contaminava os
+# resíduos do VAR e violava a hipótese por trás da GFEVD. O estimador de 1
+# dia elimina esse artefato por construção, além de não ter NAs de
+# aquecimento de janela e ser independente de drift (ao contrário de
+# Garman-Klass, mantido como comparação no apêndice).
 
-cat("\n[5/11] Estimando volatilidade Rogers-Satchell + Overnight...\n")
+cat("\n[5/11] Estimando volatilidade Rogers-Satchell + overnight...\n")
 
-rogers_satchell_overnight <- function(ohlc_mat, n = 21) {
+rogers_satchell_overnight <- function(ohlc_mat) {
   O <- as.numeric(ohlc_mat[, "Open"])
   H <- as.numeric(ohlc_mat[, "High"])
   L <- as.numeric(ohlc_mat[, "Low"])
   C <- as.numeric(ohlc_mat[, "Close"])
-  C_lag <- c(NA_real_, C[-length(C)])
- 
-  overnight2 <- (log(O/C_lag))^2
-  rs <- log(H / C) * log(H / O) + log(L / C) * log(L / O)
+  C_lag <- c(NA_real_, C[-length(C)])          # Close do pregão anterior
+  
+  overnight2 <- (log(O / C_lag))^2             # termo overnight (1 dia, sem médias)
+  rs         <- log(H / C) * log(H / O) + log(L / C) * log(L / O)   # Rogers-Satchell
   
   sig2 <- overnight2 + rs
-  sig2[!is.na(sig2) & sig2 < 0] <- NA
-  
-  
-  sqrt(sig2)
+  sig2[!is.na(sig2) & sig2 < 0] <- NA          # RS pode sair negativo por ruído de
+  # microestrutura em dias de range muito
+  # estreito — tratado como NA, não como zero
+  sqrt(sig2)                                    # desvio-padrão diário, não anualizado
 }
 
 # Apêndice (não usado na especificação principal, mantido para a tabela
@@ -241,21 +255,21 @@ for (nome in NOMES) {
   ohlc_mat <- d[, c("Open","High","Low","Close")]
   
   n_nas <- sum(is.na(ohlc_mat))
-  if (n_nas > 0) cat(" ", nome, ":", n_nas, "NAs no OHLC\n")
+  if (n_nas > 0) cat(" ", nome, ":", n_nas, "NAs no OHLC (mantidos até a Seção 7)\n")
   
   sd_diario <- rogers_satchell_overnight(ohlc_mat)
-  vol_anual  <- sd_diario * sqrt(252)
+  vol_anual <- sd_diario * sqrt(252)   # anualizado, convenção Diebold-Yilmaz (2012, 2014)
   vol_rs[[nome]] <- xts(vol_anual, order.by = index(d))
   
   n_nas_vol <- sum(is.na(vol_anual))
   if (n_nas_vol > 0) cat("   ", nome, "→", n_nas_vol, "NAs na volatilidade estimada\n")
 }
 
-cat("OK - volatilidade Rogers-Satchell + Overnight estimada para", length(vol_rs), "séries.\n")
+cat("  OK — volatilidade Rogers-Satchell+overnight estimada para", length(vol_rs), "séries.\n")
 
 
 # ==============================================================================
-# SEÇÃO 6 — TRANSFORMAÇÃO LOGARÍTMICA E TESTES DE ESTACIONARIEDADE
+# SEÇÃO 6 — TRANSFORMAÇÃO LOGARÍTMICA
 # ==============================================================================
 
 cat("\n[6/11] Transformação logarítmica...\n")
@@ -273,7 +287,7 @@ cat("  OK — log-volatilidade calculada para", length(log_vol), "séries.\n")
 
 
 # ==============================================================================
-# SEÇÃO 7 - ALINHAMENTO EM PAINEL T×8 E IMPUTAÇÃO POR FILTRO DE KALMAN
+# SEÇÃO 7 — ALINHAMENTO EM PAINEL T×8 E IMPUTAÇÃO POR FILTRO DE KALMAN
 # ==============================================================================
 
 cat("\n[7/11] Alinhando painel T×8 e imputando NAs (filtro de Kalman)...\n")
@@ -290,7 +304,7 @@ dias_sem_pregao <- rowSums(is.na(painel_raw)) == ncol(painel_raw)
 cat("\n  Dias sem pregão removidos:", sum(dias_sem_pregao), "\n")
 painel_raw <- painel_raw[!dias_sem_pregao, ]
 
-cat(" Imputando NAs com filtro de Kalman (auto.arima)...\n")
+cat("  Imputando NAs com filtro de Kalman (auto.arima)...\n")
 painel_imp <- apply(painel_raw, 2, function(col) {
   if (any(is.na(col))) na_kalman(col, model = "auto.arima", smooth = TRUE) else col
 })
@@ -299,7 +313,7 @@ colnames(painel_imp) <- NOMES
 
 stopifnot("Ainda há NAs no painel após imputação!" = sum(is.na(painel_imp)) == 0)
 
-cat("  OK - painel final:", nrow(painel_imp), "observações ×", ncol(painel_imp), "bancos. Zero NAs.\n")
+cat("  OK — painel final:", nrow(painel_imp), "observações ×", ncol(painel_imp), "bancos. Zero NAs.\n")
 
 write.csv(data.frame(data = index(painel_imp), as.data.frame(painel_imp)),
           "outputs/tabelas/painel_logvol.csv", row.names = FALSE)
@@ -434,14 +448,14 @@ bic_tabela <- data.frame(
   BIC = round(var_select$criteria["SC(n)", ], 4),
   HQ  = round(var_select$criteria["HQ(n)", ], 4)
 )
-cat("\n BIC por número de defasagens:\n")
+cat("\n  BIC por número de defasagens:\n")
 print(bic_tabela)
 write.csv(bic_tabela, "outputs/tabelas/var_selecao_lags.csv", row.names = FALSE)
 cat("  BIC selecionado:", var_select$selection["SC(n)"], "defasagens\n")
 cat("  Especificação adotada: p =", P_LAGS, "(justificada na metodologia)\n")
 
-cat("\n Verificando estabilidade do VAR...\n")
-
+cat("\n  Verificando estabilidade do VAR...\n")
+# vars::VAR/roots qualificados por namespace — ConnectednessApproach mascara VAR().
 var_est <- vars::VAR(Y, p = P_LAGS, type = "const")
 raizes  <- vars::roots(var_est, modulus = TRUE)
 cat("  Módulo máximo das raízes:", round(max(raizes), 4))
@@ -451,7 +465,7 @@ if (max(raizes) < 1) {
   stop("VAR instável! Módulo máximo = ", round(max(raizes), 4), ". Revisar dados.")
 }
 
-cat("\n Computando tabela de spillovers (GFEVD, H = ", H_HORIZONTE, ")...\n")
+cat("\n  Computando tabela de spillovers (GFEVD, H = ", H_HORIZONTE, ")...\n")
 
 dca_full <- ConnectednessApproach(
   Y, nlag = P_LAGS, nfore = H_HORIZONTE, window = NULL, corrected = FALSE, model = "VAR"
@@ -463,7 +477,7 @@ from_full    <- dca_full$FROM
 net_full     <- dca_full$NET
 tabela_gfevd <- dca_full$TABLE
 
-cat("\n Total Connectedness Index (TCI):", round(tci_full, 2), "%\n")
+cat("\n  Total Connectedness Index (TCI):", round(tci_full, 2), "%\n")
 
 tabela_dy <- data.frame(
   Banco = NOMES,
@@ -474,19 +488,25 @@ tabela_dy <- data.frame(
 tabela_dy <- tabela_dy[order(-tabela_dy$TO), ]
 rownames(tabela_dy) <- NULL
 
-cat("\n Tabela DY (full sample):\n")
+cat("\n  Tabela DY (full sample):\n")
 print(tabela_dy)
 
 write.csv(tabela_dy, "outputs/tabelas/dy_fullsample.csv", row.names = FALSE)
 write.csv(tabela_gfevd, "outputs/tabelas/gfevd_fullsample.csv")
-cat("Tabelas salvas.\n")
+cat("  Tabelas salvas.\n")
 
 
 # ==============================================================================
-# SEÇÃO 11 — ANÁLISE DINÂMICA: JANELA ROLANTE (W = 200, H = 10)
+# SEÇÃO 11 (APÊNDICE) — JANELA ROLANTE (W = 200, H = 10)
 # ==============================================================================
+# Feedback 3, Seção 3.2: a janela rolante data o pico de conectividade na
+# borda direita da janela (quando ela está mais cheia de dados de crise),
+# não na data do evento real — desloca a datação da crise em ~8 meses.
+# Mantida aqui como comparação com a convenção de Diebold-Yilmaz (2012),
+# mas a especificação dinâmica PRINCIPAL passa a ser o TVP-VAR com fatores
+# de esquecimento (Seção 12).
 
-cat("\n[11/11] Análise dinâmica - janela rolante (W =", N_JANELA_W, ", H =", H_HORIZONTE, ")...\n")
+cat("\n[11/11 — apêndice] Janela rolante (W =", N_JANELA_W, ", H =", H_HORIZONTE, ")...\n")
 
 cat("Painel:", nrow(Y), "observações | de:", as.character(index(Y)[1]),
     "até:", as.character(index(Y)[nrow(Y)]), "\n")
@@ -504,7 +524,7 @@ net_rolling  <- zoo(dca_roll$NET,  order.by = datas_roll)
 
 colnames(to_rolling) <- colnames(from_rolling) <- colnames(net_rolling) <- NOMES
 
-cat("OK -", length(datas_roll), "janelas | de:", as.character(datas_roll[1]),
+cat("OK —", length(datas_roll), "janelas | de:", as.character(datas_roll[1]),
     "até:", as.character(datas_roll[length(datas_roll)]), "\n")
 
 write.csv(data.frame(data = datas_roll, TCI = as.numeric(tci_rolling)),
@@ -522,7 +542,7 @@ p_tci <- ggplot(tci_df, aes(x = data, y = TCI)) +
             angle = 90, hjust = 1, vjust = -0.3, size = 2.8, color = "grey30") +
   scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
   scale_y_continuous(labels = function(x) paste0(x, "%")) +
-  labs(title = "Total Connectedness Index - Sistema Bancário Brasileiro (2019 - 2025)",
+  labs(title = "Total Connectedness Index — Sistema Bancário Brasileiro (2019–2025)",
        subtitle = paste0("VAR(", P_LAGS, "), GFEVD H = ", H_HORIZONTE, ", janela W = ", N_JANELA_W, " dias úteis"),
        x = NULL, y = "TCI (%)") +
   theme_minimal(base_size = 11) +
@@ -531,7 +551,7 @@ p_tci <- ggplot(tci_df, aes(x = data, y = TCI)) +
         panel.grid.minor = element_blank())
 
 ggsave("outputs/graficos/tci_rolling.png", p_tci, width = 12, height = 5, dpi = 300)
-cat("Gráfico TCI salvo.\n")
+cat("  Gráfico TCI salvo.\n")
 
 net_df <- data.frame(data = datas_roll, as.data.frame(net_rolling)) |>
   pivot_longer(-data, names_to = "Banco", values_to = "NET")
@@ -544,7 +564,7 @@ p_net <- ggplot(net_df, aes(x = data, y = NET, color = Banco)) +
   facet_wrap(~Banco, ncol = 4, scales = "free_y") +
   scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
   scale_y_continuous(labels = function(x) paste0(x, "%")) +
-  labs(title = "Spillover NET por instituição - janela rolante (W = 200)",
+  labs(title = "Spillover NET por instituição — janela rolante (W = 200)",
        subtitle = "Positivo = transmissor líquido; negativo = receptor líquido",
        x = NULL, y = "NET (%)") +
   theme_minimal(base_size = 10) +
@@ -555,13 +575,262 @@ p_net <- ggplot(net_df, aes(x = data, y = NET, color = Banco)) +
 ggsave("outputs/graficos/net_rolling.png", p_net, width = 14, height = 8, dpi = 300)
 cat("  Gráfico NET salvo.\n")
 
+# ── Figura comparativa: TCI para W = 150, 200, 250 sobrepostos ─────────────
+# Feedback 3, Seção 3.2: demonstra que o degrau/pico do TCI se desloca junto
+# com o tamanho da janela — evidência de artefato de estimação, não mudança
+# de regime. W=200 já foi calculado acima (dca_roll/tci_rolling); faltam
+# W=150 e W=250, com o mesmo estimador, defasagens e horizonte.
+
+cat("\n  Rodando janelas adicionais para a figura comparativa (W = 150, 250)...\n")
+
+JANELAS_COMPARACAO <- c(150, 200, 250)
+
+dca_roll_150 <- ConnectednessApproach(
+  Y, nlag = P_LAGS, nfore = H_HORIZONTE, window = 150, corrected = FALSE, model = "VAR"
+)
+dca_roll_250 <- ConnectednessApproach(
+  Y, nlag = P_LAGS, nfore = H_HORIZONTE, window = 250, corrected = FALSE, model = "VAR"
+)
+
+tci_150 <- zoo(dca_roll_150$TCI[, 1], order.by = as.Date(rownames(dca_roll_150$TCI)))
+tci_250 <- zoo(dca_roll_250$TCI[, 1], order.by = as.Date(rownames(dca_roll_250$TCI)))
+
+tci_comparacao <- rbind(
+  data.frame(data = index(tci_150),   TCI = as.numeric(tci_150),   W = "W = 150"),
+  data.frame(data = index(tci_rolling), TCI = as.numeric(tci_rolling), W = "W = 200"),
+  data.frame(data = index(tci_250),   TCI = as.numeric(tci_250),   W = "W = 250")
+)
+tci_comparacao$W <- factor(tci_comparacao$W, levels = c("W = 150", "W = 200", "W = 250"))
+
+write.csv(tci_comparacao, "outputs/tabelas/tci_comparacao_janelas.csv", row.names = FALSE)
+
+# Data em que o colapso deixa cada janela: observação do colapso (fim do
+# período, 23/03/2020) + W pregões. Índice na série diária do painel
+# (não na série já defasada pela janela), como o parecer especifica.
+COLAPSO_REF <- as.Date("2020-03-23")
+datas_painel <- index(painel_imp)
+idx_colapso  <- which(datas_painel >= COLAPSO_REF)[1]
+
+datas_saida <- sapply(JANELAS_COMPARACAO, function(w) {
+  idx_saida <- idx_colapso + w
+  if (idx_saida <= length(datas_painel)) as.character(datas_painel[idx_saida]) else NA
+})
+
+eventos_saida <- data.frame(
+  data  = as.Date(datas_saida),
+  W     = factor(paste0("W = ", JANELAS_COMPARACAO), levels = levels(tci_comparacao$W)),
+  label = format(as.Date(datas_saida), "%d/%m/%Y")
+)
+cat("  Colapso (ref.", as.character(COLAPSO_REF), ") deixa cada janela em:\n")
+print(eventos_saida[, c("W", "data")], row.names = FALSE)
+
+cores_janela <- c("W = 150" = "#2166ac", "W = 200" = "#b2182b", "W = 250" = "#1a9850")
+
+# As três datas de saída ficam próximas (só ~50 pregões entre elas) — se os
+# rótulos ficarem todos na mesma altura, colidem entre si e com a curva.
+# Escalona a altura em três níveis (um por janela) para não sobrepor.
+teto <- max(tci_comparacao$TCI, na.rm = TRUE)
+eventos_saida$y_label <- teto * c(0.99, 0.90, 0.81)[match(eventos_saida$W, levels(eventos_saida$W))]
+
+p_comparacao <- ggplot(tci_comparacao, aes(x = data, y = TCI, color = W)) +
+  annotate("rect", xmin = as.Date("2020-03-12"), xmax = as.Date("2020-03-23"),
+           ymin = -Inf, ymax = Inf, fill = "grey70", alpha = 0.3) +
+  geom_line(linewidth = 0.6) +
+  geom_vline(data = eventos_saida, aes(xintercept = as.numeric(data), color = W),
+             linetype = "dashed", linewidth = 0.5, show.legend = FALSE) +
+  geom_label(data = eventos_saida, aes(x = data, y = y_label, label = label, color = W),
+             size = 2.6, hjust = 0, fontface = "bold", label.size = 0,
+             fill = "white", show.legend = FALSE) +
+  scale_color_manual(values = cores_janela, name = NULL) +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  scale_y_continuous(labels = function(x) paste0(x, "%"), expand = expansion(mult = c(0.05, 0.1))) +
+  labs(
+    title = "Índice de conectividade total por janela rolante (W = 150, 200, 250)",
+    subtitle = "Faixa cinza: colapso de mar/2020. Linhas verticais: data em que o colapso deixa cada janela — o degrau acompanha W, não o evento.",
+    x = NULL, y = "TCI (%)"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(size = 9, color = "grey30"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank(),
+    legend.position = "top",
+    plot.margin = margin(t = 12, r = 16, b = 10, l = 10)
+  )
+
+ggsave("outputs/graficos/tci_comparacao_janelas.png", p_comparacao, width = 12, height = 7, dpi = 300, bg = "white")
+cat("  Gráfico comparativo (W = 150/200/250) salvo.\n")
+
 
 # ==============================================================================
-# SEÇÃO 12 - REDES: MATRIZ DE ADJACÊNCIA (FULL SAMPLE)
+# SEÇÃO 12 — TVP-VAR COM FATORES DE ESQUECIMENTO (ESPECIFICAÇÃO PRINCIPAL)
+# ==============================================================================
+# Feedback 3, Seção 3.2. Substitui a janela rolante como especificação
+# dinâmica principal. Em vez de um corte abrupto após W dias, os
+# coeficientes do VAR (beta_t) e a covariância dos choques (Sigma_t) evoluem
+# por fatores de esquecimento kappa1 e kappa2, sem descontinuidade e sem
+# perder as primeiras observações da amostra. kappa1 governa a velocidade
+# de deriva dos coeficientes (Eq. 3); kappa2, a velocidade de adaptação da
+# covariância (Eq. 4).
+#
+# O pacote ConnectednessApproach estima o TVP-VAR final dado (kappa1,
+# kappa2) — isso é só um argumento de função. O que NÃO existe pronto é a
+# SELEÇÃO de kappa1/kappa2: implementamos abaixo o filtro de Kalman com
+# fatores de esquecimento (Eq. 1-6) para rodar a grade e escolher o par por
+# verossimilhança preditiva fora da amostra, exatamente como descrito.
+#
+# AVISO DE DESEMPENHO: a grade tem 6 x 3 = 18 combinações, cada uma rodando
+# o filtro sobre a amostra inteira (~1700 observações, estado de dimensão
+# N*(N*p+1) = 136). Em R puro isso pode levar alguns minutos.
+
+cat("\n[12] TVP-VAR — seleção de fatores de esquecimento por verossimilhança preditiva...\n")
+
+# ── Passo 1: matriz Y e amostra de treino ───────────────────────────────────
+Y_mat <- as.matrix(painel_imp)
+N     <- ncol(Y_mat)
+Tt    <- nrow(Y_mat)
+T0    <- 200   # observações de treino (Feedback 3.2, passo 2)
+
+var_treino <- vars::VAR(Y_mat[1:T0, ], p = P_LAGS, type = "const")
+
+# beta0: coeficientes empilhados equação a equação, na MESMA ordem de
+# z_t = (y_{t-1}, ..., y_{t-p}, 1) — que é a ordem que vars::VAR usa
+# internamente (lag 1 de todas as variáveis, lag 2 de todas, ..., const).
+beta0  <- as.numeric(unlist(lapply(var_treino$varresult, coef)))
+P0     <- vcov(var_treino)                      # covariância dos coeficientes (OLS, treino)
+Sigma0 <- stats::cov(residuals(var_treino))      # covariância dos resíduos (treino)
+
+k_dim <- N * (N * P_LAGS + 1)
+stopifnot(
+  "Dimensão de beta0 não bate com N*(N*p+1)" = length(beta0) == k_dim,
+  "Dimensão de P0 não bate com N*(N*p+1)"    = all(dim(P0) == k_dim)
+)
+cat("  Treino: T0 =", T0, "obs | dimensão do estado k =", k_dim, "\n")
+
+# ── Passo 2: filtro de Kalman com fatores de esquecimento ──────────────────
+construir_zt <- function(Y_mat, t, p) {
+  N <- ncol(Y_mat)
+  z <- numeric(N * p + 1)
+  for (l in 1:p) z[((l - 1) * N + 1):(l * N)] <- Y_mat[t - l, ]
+  z[N * p + 1] <- 1
+  z
+}
+
+tvpvar_loglik <- function(Y_mat, p, kappa1, kappa2, t0, beta0, P0, Sigma0) {
+  N  <- ncol(Y_mat)
+  Tt <- nrow(Y_mat)
+  
+  beta  <- beta0
+  P     <- P0
+  Sigma <- Sigma0
+  loglik <- 0
+  
+  for (t in (p + 1):Tt) {
+    zt <- construir_zt(Y_mat, t, p)
+    Zt <- diag(N) %x% matrix(zt, nrow = 1)        # N x k, Eq. (1)
+    
+    P_pred <- P / kappa1                          # Eq. (3)
+    Ft     <- Zt %*% P_pred %*% t(Zt) + Sigma      # Eq. (5), usa Sigma_{t-1}
+    et     <- Y_mat[t, ] - as.numeric(Zt %*% beta)
+    
+    Ft_inv <- solve(Ft)
+    
+    if (t > t0) {
+      logdetF <- as.numeric(determinant(Ft, logarithm = TRUE)$modulus)
+      loglik  <- loglik - 0.5 * (N * log(2 * pi) + logdetF + as.numeric(t(et) %*% Ft_inv %*% et))  # Eq. (6)
+    }
+    
+    Kt   <- P_pred %*% t(Zt) %*% Ft_inv
+    beta <- beta + as.numeric(Kt %*% et)
+    P    <- P_pred - Kt %*% Zt %*% P_pred
+    
+    eps_hat <- Y_mat[t, ] - as.numeric(Zt %*% beta)
+    Sigma   <- kappa2 * Sigma + (1 - kappa2) * (eps_hat %*% t(eps_hat))   # Eq. (4)
+  }
+  
+  loglik
+}
+
+# ── Passo 3: grade e verossimilhança preditiva (Feedback 3.2, passos 1-4) ──
+grade_k1 <- c(0.94, 0.96, 0.98, 0.99, 0.995, 1.00)
+grade_k2 <- c(0.94, 0.96, 0.99)
+
+grade <- expand.grid(kappa1 = grade_k1, kappa2 = grade_k2)
+grade$loglik <- NA_real_
+
+for (i in seq_len(nrow(grade))) {
+  cat("  (", i, "/", nrow(grade), ") kappa1 =", grade$kappa1[i], ", kappa2 =", grade$kappa2[i], "... ")
+  ll <- tvpvar_loglik(Y_mat, P_LAGS, grade$kappa1[i], grade$kappa2[i], T0, beta0, P0, Sigma0)
+  grade$loglik[i] <- ll
+  cat("logL =", round(ll, 1), "\n")
+}
+
+# ── Passo 4: pesos posteriores (Feedback 3.2, passo 5) ──────────────────────
+grade$loglik_rel <- grade$loglik - max(grade$loglik)   # subtrai o máximo antes de exponenciar
+grade$peso_post  <- exp(grade$loglik_rel) / sum(exp(grade$loglik_rel))
+
+grade_tabela <- grade[order(-grade$peso_post), ]
+cat("\n  Grade completa (ordenada por peso posterior):\n")
+print(grade_tabela, row.names = FALSE)
+
+write.csv(grade_tabela, "outputs/tabelas/tvpvar_grade_kappa.csv", row.names = FALSE)
+
+melhor <- grade_tabela[1, ]
+KAPPA1 <- melhor$kappa1
+KAPPA2 <- melhor$kappa2
+cat("\n  Par selecionado: kappa1 =", KAPPA1, ", kappa2 =", KAPPA2,
+    "(peso posterior =", round(melhor$peso_post, 4), ")\n")
+
+# ── Passo 5: estimação final via ConnectednessApproach ──────────────────────
+cat("\n  Estimando TVP-VAR final (kappa1 =", KAPPA1, ", kappa2 =", KAPPA2, ")...\n")
+
+dca_tvp <- ConnectednessApproach(
+  Y, nlag = P_LAGS, nfore = H_HORIZONTE, model = "TVP-VAR", connectedness = "Time",
+  VAR_config = list(TVPVAR = list(kappa1 = KAPPA1, kappa2 = KAPPA2, prior = "BayesPrior", gamma = 0.01))
+)
+
+tci_tvp <- zoo(dca_tvp$TCI[, 1], order.by = as.Date(rownames(dca_tvp$TCI)))
+net_tvp <- zoo(dca_tvp$NET, order.by = index(tci_tvp))
+colnames(net_tvp) <- NOMES
+
+cat("  OK —", length(tci_tvp), "observações de TCI dinâmico (TVP-VAR).\n")
+
+write.csv(data.frame(data = index(tci_tvp), TCI = as.numeric(tci_tvp)),
+          "outputs/tabelas/tci_tvpvar.csv", row.names = FALSE)
+write.csv(data.frame(data = index(net_tvp), as.data.frame(net_tvp)),
+          "outputs/tabelas/net_tvpvar.csv", row.names = FALSE)
+
+p_tci_tvp <- ggplot(data.frame(data = index(tci_tvp), TCI = as.numeric(tci_tvp)),
+                    aes(x = data, y = TCI)) +
+  geom_line(color = "#b2182b", linewidth = 0.7) +
+  geom_vline(data = EVENTOS, aes(xintercept = as.numeric(data)),
+             linetype = "dashed", color = "grey40", linewidth = 0.5) +
+  geom_text(data = EVENTOS, aes(x = data, y = max(as.numeric(tci_tvp)) * 0.97, label = label),
+            angle = 90, hjust = 1, vjust = -0.3, size = 2.8, color = "grey30") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  labs(title = "Total Connectedness Index — TVP-VAR (especificação principal)",
+       subtitle = paste0("kappa1 = ", KAPPA1, ", kappa2 = ", KAPPA2,
+                         " | GFEVD H = ", H_HORIZONTE),
+       x = NULL, y = "TCI (%)") +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold", size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid.minor = element_blank())
+
+ggsave("outputs/graficos/tci_tvpvar.png", p_tci_tvp, width = 12, height = 5, dpi = 300)
+cat("  Gráfico TCI (TVP-VAR) salvo.\n")
+
+
+# ==============================================================================
+# SEÇÃO 13 — REDES: MATRIZ DE ADJACÊNCIA (FULL SAMPLE)
 # ==============================================================================
 
-cat("\n[11] Construindo matriz de adjacência (grafo completo, sem threshold)...\n")
+cat("\n[13] Construindo matriz de adjacência (grafo completo, sem threshold)...\n")
 
+# dca_full$CT ("Connectedness Table"), não $TABLE. Formato 3D/4D não
+# documentado para connectedness="Time" — inspecionar antes de indexar.
 cat("  Nomes disponíveis em dca_full:\n")
 print(names(dca_full))
 cat("\n  Dimensões de dca_full$CT:", paste(dim(dca_full$CT), collapse = " x "), "\n")
@@ -591,29 +860,29 @@ print(round(rowSums(theta), 4))
 theta_offdiag <- theta
 diag(theta_offdiag) <- 0
 
-# TCI manual vs. dca_full$TCI para confirmar que a
-# fatia extraída do array é a correta
+# Teste de sanidade: TCI manual (Eq. 6.9) vs. dca_full$TCI — confirma que a
+# fatia extraída do array está correta.
 tci_manual <- mean(theta_offdiag) * length(NOMES) * 100
 
-cat("\n  Verificação - TCI manual vs. TCI do pacote:\n")
+cat("\n  Verificação — TCI manual vs. TCI do pacote:\n")
 cat("    Manual:", round(tci_manual, 4), "%  |  Pacote:", round(dca_full$TCI, 4), "%\n")
 
 if (abs(tci_manual - as.numeric(dca_full$TCI)) > 0.05) {
-  warning("TCI manual e do pacote NÃO batem")
+  warning("TCI manual e do pacote NÃO batem — revise a indexação de dca_full$CT.")
 } else {
-  cat("OK\n")
+  cat("    OK — bateu.\n")
 }
 
 
 # ==============================================================================
-# SEÇÃO 13 — REDES: ORIENTAÇÃO DAS ARESTAS E OBJETO IGRAPH (FULL SAMPLE)
+# SEÇÃO 14 — REDES: ORIENTAÇÃO DAS ARESTAS E OBJETO IGRAPH (FULL SAMPLE)
 # ==============================================================================
 
-cat("\n[12] Construindo grafo dirigido (g_full) com orientação corrigida...\n")
+cat("\n[14] Construindo grafo dirigido (g_full) com orientação corrigida...\n")
 
-# theta_ij = fluxo j -> i, mas igraph lê mat[i,j] como aresta
+# theta_ij = fluxo j -> i (texto), mas igraph lê mat[i,j] como aresta
 # saindo de i. Transpor corrige a direção sem gerar erro de execução caso
-# esquecido
+# esquecido — por isso o teste de sanidade abaixo é obrigatório.
 adj_full <- t(theta_offdiag)
 
 g_full <- graph_from_adjacency_matrix(adj_full, mode = "directed", weighted = TRUE, diag = FALSE)
@@ -621,6 +890,8 @@ g_full <- graph_from_adjacency_matrix(adj_full, mode = "directed", weighted = TR
 cat("  Grafo g_full:", vcount(g_full), "nós,", ecount(g_full), "arestas",
     "(esperado:", length(NOMES), "nós,", length(NOMES) * (length(NOMES) - 1), "arestas)\n")
 
+# strength(out) = TOi (Eq. 6.11), strength(in) = FROMi (Eq. 6.10) — sem
+# dividir por N. Sinal de NETi tem que bater com dca_full$NET.
 to_grafo   <- igraph::strength(g_full, mode = "out") * 100
 from_grafo <- igraph::strength(g_full, mode = "in")  * 100
 net_grafo  <- to_grafo - from_grafo
@@ -634,28 +905,32 @@ comparacao_net <- data.frame(
   NET_grafo  = round(net_grafo[NOMES], 2),
   Mesmo_sinal = sign(net_pacote[NOMES]) == sign(net_grafo[NOMES])
 )
-cat("\n  Verificação de direção - NET do pacote vs. NET do grafo:\n")
+cat("\n  Verificação de direção — NET do pacote vs. NET do grafo:\n")
 print(comparacao_net, row.names = FALSE)
 
 if (!all(comparacao_net$Mesmo_sinal)) {
-  warning("Sinal de NET do grafo não bate com dca_full$NET")
+  warning("Sinal de NET do grafo não bate com dca_full$NET — confira a transposição.")
 } else {
-  cat("\n  OK, sinais batem em todos os bancos.\n")
+  cat("\n  OK — sinais batem em todos os bancos.\n")
 }
 
 V(g_full)$name <- NOMES
 
 
 # ==============================================================================
-# SEÇÃO 14 — REDES: MÉTRICAS DE CENTRALIDADE (FULL SAMPLE)
+# SEÇÃO 15 — REDES: MÉTRICAS DE CENTRALIDADE (FULL SAMPLE)
 # ==============================================================================
 
-cat("\n[13] Calculando métricas de centralidade (grafo completo)...\n")
+cat("\n[15] Calculando métricas de centralidade (grafo completo)...\n")
 
+# igraph trata peso como distância — inverte para que conexão forte = caminho curto.
 betweenness_full <- igraph::betweenness(g_full, directed = TRUE, weights = 1 / E(g_full)$weight)
 
+# eigen_centrality(directed=TRUE) já é a versão "in" por construção (nó
+# importante se é apontado por nós importantes) — sem ajuste manual.
 eigen_full <- igraph::eigen_centrality(g_full, directed = TRUE)$vector
 
+# PageRank segue a direção j -> i por padrão, mesma lógica desejada.
 pagerank_full <- igraph::page_rank(g_full, directed = TRUE, weights = E(g_full)$weight)$vector
 
 metricas_centralidade <- data.frame(
@@ -673,7 +948,7 @@ print(metricas_centralidade)
 write.csv(metricas_centralidade, "outputs/tabelas/centralidade_fullsample.csv", row.names = FALSE)
 cat("  Salvo em outputs/tabelas/centralidade_fullsample.csv\n")
 
-# Classificação para assortatividade por tipo de controle.
+# Classificação manual (Seção 6.1.1) para assortatividade por tipo de controle.
 tipo_controle <- c(
   ITUB4 = "Privado nacional", BBDC4 = "Privado nacional",
   BBAS3 = "Público federal", SANB11 = "Privado estrangeiro",
@@ -693,16 +968,20 @@ print(data.frame(Banco = names(tipo_controle_ord), Tipo_controle = tipo_controle
 
 
 # ==============================================================================
-# SEÇÃO 15 — REDES: GRAFO DE VISUALIZAÇÃO (NET COLAPSADO, THRESHOLD RELATIVO)
+# SEÇÃO 16 — REDES: GRAFO DE VISUALIZAÇÃO (NET COLAPSADO, THRESHOLD RELATIVO)
 # ==============================================================================
 
-cat("\n[14] Construindo grafo de visualização (NET colapsado, threshold relativo",
+cat("\n[16] Construindo grafo de visualização (NET colapsado, threshold relativo",
     THRESHOLD_REL * 100, "% do par mais forte)...\n")
 
+# NETij = theta_ji - theta_ij (Eq. 6.13): positivo = i -> j.
 npdc <- adj_full - theta_offdiag
 stopifnot("npdc deveria ser antissimétrica" = all(abs(npdc + t(npdc)) < 1e-12))
 
-
+# NETij (diferença) é estruturalmente menor que theta_ij bruto e se dilui
+# entre até 7 contrapartes — um threshold absoluto pensado para o grafo
+# bruto (Opção A) poda quase tudo e isola nós. Por isso usamos corte
+# relativo ao par mais forte observado.
 pares <- combn(NOMES, 2, simplify = FALSE)
 dist_netij <- data.frame(
   par   = sapply(pares, function(p) paste(p, collapse = "-")),
@@ -734,6 +1013,7 @@ V(g_net)$TO   <- to_grafo[V(g_net)$name]
 V(g_net)$NET  <- net_grafo[V(g_net)$name]
 V(g_net)$Tipo <- tipo_controle[V(g_net)$name]
 
+# Layout FR calculado uma vez — reaproveitar fixo nos painéis de subperíodo futuros.
 set.seed(42)
 layout_fr <- create_layout(g_net, layout = "fr")
 
@@ -750,7 +1030,7 @@ p_rede <- ggraph(layout_fr) +
   scale_fill_gradient2(low = "#2166ac", mid = "white", high = "#b2182b", midpoint = 0, name = "NET (%)") +
   geom_node_text(aes(label = name), vjust = -1.6, size = 4, fontface = "bold") +
   labs(
-    title = "Rede de conectividade - Sistema Bancário Brasileiro (full sample, 2019-2025)",
+    title = "Rede de conectividade — Sistema Bancário Brasileiro (full sample, 2019-2025)",
     subtitle = paste0("Arestas: NET par-a-par (Eq. 6.13), threshold relativo ", THRESHOLD_REL * 100,
                       "% do par mais forte | Tamanho do nó ~ TOi | Layout: Fruchterman-Reingold")
   ) +
