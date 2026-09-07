@@ -39,7 +39,6 @@ DATA_FIM    <- "2025-12-31"
 N_JANELA_W    <- 200
 H_HORIZONTE   <- 10
 P_LAGS        <- 2
-THRESHOLD     <- 0.05   
 THRESHOLD_REL <- 0.05   
 
 EVENTOS <- data.frame(
@@ -52,7 +51,7 @@ EVENTOS <- data.frame(
 # LEITURA DOS DADOS (EXCEL)
 # ==============================================================================
 
-cat("\n[1/10] Lendo cotações do arquivo Excel (ComDinheiro)...\n")
+cat("\n[1/11] Lendo cotações do arquivo Excel (ComDinheiro)...\n")
 
 dados_adj <- list()
 
@@ -99,7 +98,7 @@ for (nome in NOMES) {
 # SEÇÃO 2 — SANITY CHECKS NO OHLC
 # ==============================================================================
 
-cat("\n[2/10] Verificando consistência OHLC...\n")
+cat("\n[2/11] Verificando consistência OHLC...\n")
 
 # tolerância numérica: sem ela, ruído de ponto flutuante (~1e-9) do
 # cálculo do fator de ajuste do ComDinheiro é lido como violação.
@@ -128,7 +127,7 @@ cat("OK - sanity checks concluídos.\n")
 # SEÇÃO 3 — FILTRO DE LIQUIDEZ
 # ==============================================================================
 
-cat("\n[3/10] Aplicando filtro de liquidez...\n")
+cat("\n[3/11] Aplicando filtro de liquidez...\n")
 
 # Sem volume em quantidade de ações no ComDinheiro, só piso de volume financeiro.
 VOLUME_MIN_BRL <- 100000
@@ -152,7 +151,7 @@ cat("OK - filtro de liquidez aplicado.\n")
 # SEÇÃO 4 — IDENTIFICAÇÃO DE OUTLIERS
 # ==============================================================================
 
-cat("\n[4/10] Identificando outliers (|z| > 5)...\n")
+cat("\n[4/11] Identificando outliers (|z| > 5)...\n")
 
 THRESHOLD_Z <- 5
 relatorio_outliers <- data.frame()
@@ -207,7 +206,7 @@ if (nrow(relatorio_outliers) > 0) {
 # SEÇÃO 5 — ESTIMAÇÃO DA VOLATILIDADE Rogers-Satchell + Overnight...
 # ==============================================================================
 
-cat("\n[5/10] Estimando volatilidade Rogers-Satchell + Overnight...\n")
+cat("\n[5/11] Estimando volatilidade Rogers-Satchell + Overnight...\n")
 
 rogers_satchell_overnight <- function(ohlc_mat, n = 21) {
   O <- as.numeric(ohlc_mat[, "Open"])
@@ -259,84 +258,25 @@ cat("OK - volatilidade Rogers-Satchell + Overnight estimada para", length(vol_rs
 # SEÇÃO 6 — TRANSFORMAÇÃO LOGARÍTMICA E TESTES DE ESTACIONARIEDADE
 # ==============================================================================
 
-cat("\n[6/10] Transformação log e testes de estacionariedade...\n")
+cat("\n[6/11] Transformação logarítmica...\n")
 
 PISO_NUMERICO <- 1e-8
 log_vol <- list()
-resultados_testes <- data.frame()
 
 for (nome in NOMES) {
-  vyz <- as.numeric(vol_yz[[nome]])
-  lv  <- log(pmax(vyz, PISO_NUMERICO))
-  log_vol[[nome]] <- xts(lv, order.by = index(vol_yz[[nome]]))
-  lv_limpo <- na.omit(lv)
-  
-  adf_res     <- ur.df(lv_limpo, type = "drift", selectlags = "BIC")
-  tau_stat    <- adf_res@teststat["statistic", "tau2"]
-  tau_cv5     <- adf_res@cval["tau2", "5pct"]
-  adf_rejeita <- tau_stat < tau_cv5
-  
-  kpss_res      <- tryCatch(kpss.test(lv_limpo, null = "Level"), error = function(e) NULL)
-  kpss_pval     <- if (!is.null(kpss_res)) kpss_res$p.value else NA
-  kpss_nrejeita <- if (!is.na(kpss_pval)) kpss_pval > 0.05 else NA
-  
-  ers_res <- tryCatch(ur.ers(lv_limpo, type = "DF-GLS", model = "constant", lag.max = 4),
-                      error = function(e) NULL)
-  ers_stat    <- if (!is.null(ers_res)) ers_res@teststat else NA
-  ers_cv5     <- if (!is.null(ers_res)) ers_res@cval[1, "5pct"] else NA
-  ers_rejeita <- if (!is.na(ers_stat) && !is.na(ers_cv5)) ers_stat < ers_cv5 else NA
-  
-  pp_res <- tryCatch(ur.pp(lv_limpo, type = "Z-tau", model = "constant", lags = "short"),
-                     error = function(e) NULL)
-  pp_stat    <- if (!is.null(pp_res)) pp_res@teststat else NA
-  pp_cv5     <- if (!is.null(pp_res)) pp_res@cval[1, "5pct"] else NA
-  pp_rejeita <- if (!is.na(pp_stat) && !is.na(pp_cv5)) pp_stat < pp_cv5 else NA
-  
-  # ur.za@cval = c(1%, 5%, 10%), vetor sem nomes
-  za_res <- tryCatch(ur.za(lv_limpo, model = "both", lag = 4), error = function(e) NULL)
-  za_stat    <- if (!is.null(za_res)) za_res@teststat else NA
-  za_cv5     <- if (!is.null(za_res)) za_res@cval[2] else NA
-  za_rejeita <- if (!is.na(za_stat) && !is.na(za_cv5)) za_stat < za_cv5 else NA
-  
-  lb_pval <- Box.test(lv_limpo, lag = 20, type = "Ljung-Box")$p.value
-  arch_res  <- tryCatch(ArchTest(lv_limpo, lags = 10), error = function(e) NULL)
-  arch_pval <- if (!is.null(arch_res)) arch_res$p.value else NA
-  
-  resultados_testes <- rbind(resultados_testes, data.frame(
-    Banco = nome,
-    ADF_tau = round(tau_stat, 3), ADF_cv5pct = round(tau_cv5, 3), ADF_rejeita_H0 = adf_rejeita,
-    KPSS_pval = round(kpss_pval, 3), KPSS_nao_rejeita = kpss_nrejeita,
-    DFGLS_stat = round(ers_stat, 3), DFGLS_cv5pct = round(ers_cv5, 3), DFGLS_rejeita_H0 = ers_rejeita,
-    PP_stat = round(pp_stat, 3), PP_cv5pct = round(pp_cv5, 3), PP_rejeita_H0 = pp_rejeita,
-    ZA_stat = round(za_stat, 3), ZA_cv5pct = round(za_cv5, 3), ZA_rejeita_H0 = za_rejeita,
-    LjungBox_p = round(lb_pval, 4), ARCH_LM_p = round(arch_pval, 4),
-    stringsAsFactors = FALSE
-  ))
+  vol <- as.numeric(vol_rs[[nome]])
+  lv  <- log(pmax(vol, PISO_NUMERICO))
+  log_vol[[nome]] <- xts(lv, order.by = index(vol_rs[[nome]]))
 }
 
-cat("\nResultados dos testes de estacionariedade:\n")
-print(resultados_testes)
-
-falhas_adf   <- resultados_testes$Banco[resultados_testes$ADF_rejeita_H0 == FALSE]
-falhas_kpss  <- resultados_testes$Banco[resultados_testes$KPSS_nao_rejeita == FALSE]
-falhas_dfgls <- resultados_testes$Banco[resultados_testes$DFGLS_rejeita_H0 == FALSE]
-falhas_pp    <- resultados_testes$Banco[resultados_testes$PP_rejeita_H0 == FALSE]
-falhas_za    <- resultados_testes$Banco[resultados_testes$ZA_rejeita_H0 == FALSE]
-if (length(falhas_adf) > 0)   warning("ADF NÃO rejeitou raiz unitária em: ", paste(falhas_adf, collapse=", "))
-if (length(falhas_kpss) > 0)  warning("KPSS rejeitou estacionariedade em: ", paste(falhas_kpss, collapse=", "))
-if (length(falhas_dfgls) > 0) warning("DF-GLS NÃO rejeitou raiz unitária em: ", paste(falhas_dfgls, collapse=", "))
-if (length(falhas_pp) > 0)    warning("Phillips-Perron NÃO rejeitou raiz unitária em: ", paste(falhas_pp, collapse=", "))
-if (length(falhas_za) > 0)    warning("Zivot-Andrews NÃO rejeitou raiz unitária em: ", paste(falhas_za, collapse=", "))
-
-write.csv(resultados_testes, "outputs/tabelas/testes_estacionariedade.csv", row.names = FALSE)
-cat("Tabela salva em outputs/tabelas/testes_estacionariedade.csv\n")
+cat("  OK — log-volatilidade calculada para", length(log_vol), "séries.\n")
 
 
 # ==============================================================================
 # SEÇÃO 7 - ALINHAMENTO EM PAINEL T×8 E IMPUTAÇÃO POR FILTRO DE KALMAN
 # ==============================================================================
 
-cat("\n[7/10] Alinhando painel T×8 e imputando NAs (filtro de Kalman)...\n")
+cat("\n[7/11] Alinhando painel T×8 e imputando NAs (filtro de Kalman)...\n")
 
 painel_raw <- do.call(merge, c(log_vol, all = TRUE))
 colnames(painel_raw) <- NOMES
@@ -366,10 +306,100 @@ write.csv(data.frame(data = index(painel_imp), as.data.frame(painel_imp)),
 
 
 # ==============================================================================
-# SEÇÃO 8 — ESTATÍSTICAS DESCRITIVAS
+# SEÇÃO 8 — TESTES DE ESTACIONARIEDADE E MEMÓRIA LONGA (PAINEL PÓS-KALMAN)
+# ==============================================================================
+# Feedback 3, Seção 3.7: os testes rodavam sobre a série pré-imputação com
+# na.omit(), que emenda segmentos não contíguos (cola o dia 50 direto no
+# dia 73 se o meio virou NA). Agora rodam sobre painel_imp — o painel que o
+# VAR de fato usa, já contínuo e sem NA por construção (Seção 7).
+
+cat("\n[8/11] Testes de estacionariedade e memória longa (painel pós-Kalman)...\n")
+
+resultados_testes <- data.frame()
+
+for (nome in NOMES) {
+  lv <- as.numeric(painel_imp[, nome])
+  
+  adf_res     <- ur.df(lv, type = "drift", selectlags = "BIC")
+  tau_stat    <- adf_res@teststat["statistic", "tau2"]
+  tau_cv5     <- adf_res@cval["tau2", "5pct"]
+  adf_rejeita <- tau_stat < tau_cv5
+  
+  kpss_res      <- tryCatch(kpss.test(lv, null = "Level"), error = function(e) NULL)
+  kpss_pval     <- if (!is.null(kpss_res)) kpss_res$p.value else NA
+  kpss_nrejeita <- if (!is.na(kpss_pval)) kpss_pval > 0.05 else NA
+  
+  ers_res <- tryCatch(ur.ers(lv, type = "DF-GLS", model = "constant", lag.max = 4),
+                      error = function(e) NULL)
+  ers_stat    <- if (!is.null(ers_res)) ers_res@teststat else NA
+  ers_cv5     <- if (!is.null(ers_res)) ers_res@cval[1, "5pct"] else NA
+  ers_rejeita <- if (!is.na(ers_stat) && !is.na(ers_cv5)) ers_stat < ers_cv5 else NA
+  
+  pp_res <- tryCatch(ur.pp(lv, type = "Z-tau", model = "constant", lags = "short"),
+                     error = function(e) NULL)
+  pp_stat    <- if (!is.null(pp_res)) pp_res@teststat else NA
+  pp_cv5     <- if (!is.null(pp_res)) pp_res@cval[1, "5pct"] else NA
+  pp_rejeita <- if (!is.na(pp_stat) && !is.na(pp_cv5)) pp_stat < pp_cv5 else NA
+  
+  # ur.za@cval = c(1%, 5%, 10%), vetor sem nomes
+  za_res <- tryCatch(ur.za(lv, model = "both", lag = 4), error = function(e) NULL)
+  za_stat    <- if (!is.null(za_res)) za_res@teststat else NA
+  za_cv5     <- if (!is.null(za_res)) za_res@cval[2] else NA
+  za_rejeita <- if (!is.na(za_stat) && !is.na(za_cv5)) za_stat < za_cv5 else NA
+  
+  lb_pval <- Box.test(lv, lag = 20, type = "Ljung-Box")$p.value
+  arch_res  <- tryCatch(ArchTest(lv, lags = 10), error = function(e) NULL)
+  arch_pval <- if (!is.null(arch_res)) arch_res$p.value else NA
+  
+  # Integração fracionária (Geweke-Porter-Hudak): a série pode não ser I(1)
+  # nem I(0) — ADF e KPSS rejeitando simultaneamente é a assinatura clássica
+  # de memória longa, não uma contradição a resolver. d in (0, 0.5):
+  # estacionária com memória longa; d in [0.5, 1): não-estacionária com
+  # memória longa. bandw.exp = 0.5 é o default (K = trunc(n^0.5)).
+  gph_res <- tryCatch(fracdiff::fdGPH(lv, bandw.exp = 0.5), error = function(e) NULL)
+  gph_d      <- if (!is.null(gph_res)) gph_res$d     else NA
+  gph_sd_as  <- if (!is.null(gph_res)) gph_res$sd.as else NA
+  
+  resultados_testes <- rbind(resultados_testes, data.frame(
+    Banco = nome,
+    ADF_tau = round(tau_stat, 3), ADF_cv5pct = round(tau_cv5, 3), ADF_rejeita_H0 = adf_rejeita,
+    KPSS_pval = round(kpss_pval, 3), KPSS_nao_rejeita = kpss_nrejeita,
+    DFGLS_stat = round(ers_stat, 3), DFGLS_cv5pct = round(ers_cv5, 3), DFGLS_rejeita_H0 = ers_rejeita,
+    PP_stat = round(pp_stat, 3), PP_cv5pct = round(pp_cv5, 3), PP_rejeita_H0 = pp_rejeita,
+    ZA_stat = round(za_stat, 3), ZA_cv5pct = round(za_cv5, 3), ZA_rejeita_H0 = za_rejeita,
+    LjungBox_p = round(lb_pval, 4), ARCH_LM_p = round(arch_pval, 4),
+    GPH_d = round(gph_d, 3), GPH_SE_asint = round(gph_sd_as, 3),
+    stringsAsFactors = FALSE
+  ))
+}
+
+cat("\n  Resultados dos testes de estacionariedade e memória longa:\n")
+print(resultados_testes)
+
+falhas_adf   <- resultados_testes$Banco[resultados_testes$ADF_rejeita_H0 == FALSE]
+falhas_kpss  <- resultados_testes$Banco[resultados_testes$KPSS_nao_rejeita == FALSE]
+falhas_dfgls <- resultados_testes$Banco[resultados_testes$DFGLS_rejeita_H0 == FALSE]
+falhas_pp    <- resultados_testes$Banco[resultados_testes$PP_rejeita_H0 == FALSE]
+falhas_za    <- resultados_testes$Banco[resultados_testes$ZA_rejeita_H0 == FALSE]
+if (length(falhas_adf) > 0)   warning("ADF NÃO rejeitou raiz unitária em: ", paste(falhas_adf, collapse=", "))
+if (length(falhas_kpss) > 0)  warning("KPSS rejeitou estacionariedade em: ", paste(falhas_kpss, collapse=", "))
+if (length(falhas_dfgls) > 0) warning("DF-GLS NÃO rejeitou raiz unitária em: ", paste(falhas_dfgls, collapse=", "))
+if (length(falhas_pp) > 0)    warning("Phillips-Perron NÃO rejeitou raiz unitária em: ", paste(falhas_pp, collapse=", "))
+if (length(falhas_za) > 0)    warning("Zivot-Andrews NÃO rejeitou raiz unitária em: ", paste(falhas_za, collapse=", "))
+
+cat("\n  Nota: ADF rejeitando e KPSS não rejeitando simultaneamente (comum aqui)\n",
+    "  não é contradição — é a assinatura de memória longa (0 < d < 1), não de\n",
+    "  raiz unitária. Ver coluna GPH_d.\n")
+
+write.csv(resultados_testes, "outputs/tabelas/testes_estacionariedade.csv", row.names = FALSE)
+cat("  Tabela salva em outputs/tabelas/testes_estacionariedade.csv\n")
+
+
+# ==============================================================================
+# SEÇÃO 9 — ESTATÍSTICAS DESCRITIVAS
 # ==============================================================================
 
-cat("\n[8/10] Calculando estatísticas descritivas...\n")
+cat("\n[9/11] Calculando estatísticas descritivas...\n")
 
 skewness_fn <- function(x) mean((x - mean(x))^3) / sd(x)^3
 kurtosis_fn <- function(x) mean((x - mean(x))^4) / sd(x)^4 - 3
@@ -388,10 +418,10 @@ cat("  Salvo em outputs/tabelas/estatisticas_descritivas.csv\n")
 
 
 # ==============================================================================
-# SEÇÃO 9 — VAR(2) + GFEVD + ÍNDICES DY — MODELO ESTÁTICO (FULL SAMPLE)
+# SEÇÃO 10 — VAR(2) + GFEVD + ÍNDICES DY — MODELO ESTÁTICO (FULL SAMPLE)
 # ==============================================================================
 
-cat("\n[9/10] Estimando VAR(2) + GFEVD (full sample)...\n")
+cat("\n[10/11] Estimando VAR(2) + GFEVD (full sample)...\n")
 
 Y <- zoo(as.matrix(painel_imp), order.by = index(painel_imp))
 
@@ -453,10 +483,10 @@ cat("Tabelas salvas.\n")
 
 
 # ==============================================================================
-# SEÇÃO 10 — ANÁLISE DINÂMICA: JANELA ROLANTE (W = 200, H = 10)
+# SEÇÃO 11 — ANÁLISE DINÂMICA: JANELA ROLANTE (W = 200, H = 10)
 # ==============================================================================
 
-cat("\n[10/10] Análise dinâmica - janela rolante (W =", N_JANELA_W, ", H =", H_HORIZONTE, ")...\n")
+cat("\n[11/11] Análise dinâmica - janela rolante (W =", N_JANELA_W, ", H =", H_HORIZONTE, ")...\n")
 
 cat("Painel:", nrow(Y), "observações | de:", as.character(index(Y)[1]),
     "até:", as.character(index(Y)[nrow(Y)]), "\n")
@@ -527,7 +557,7 @@ cat("  Gráfico NET salvo.\n")
 
 
 # ==============================================================================
-# SEÇÃO 11 - REDES: MATRIZ DE ADJACÊNCIA (FULL SAMPLE)
+# SEÇÃO 12 - REDES: MATRIZ DE ADJACÊNCIA (FULL SAMPLE)
 # ==============================================================================
 
 cat("\n[11] Construindo matriz de adjacência (grafo completo, sem threshold)...\n")
@@ -576,7 +606,7 @@ if (abs(tci_manual - as.numeric(dca_full$TCI)) > 0.05) {
 
 
 # ==============================================================================
-# SEÇÃO 12 — REDES: ORIENTAÇÃO DAS ARESTAS E OBJETO IGRAPH (FULL SAMPLE)
+# SEÇÃO 13 — REDES: ORIENTAÇÃO DAS ARESTAS E OBJETO IGRAPH (FULL SAMPLE)
 # ==============================================================================
 
 cat("\n[12] Construindo grafo dirigido (g_full) com orientação corrigida...\n")
@@ -617,7 +647,7 @@ V(g_full)$name <- NOMES
 
 
 # ==============================================================================
-# SEÇÃO 13 — REDES: MÉTRICAS DE CENTRALIDADE (FULL SAMPLE)
+# SEÇÃO 14 — REDES: MÉTRICAS DE CENTRALIDADE (FULL SAMPLE)
 # ==============================================================================
 
 cat("\n[13] Calculando métricas de centralidade (grafo completo)...\n")
@@ -663,7 +693,7 @@ print(data.frame(Banco = names(tipo_controle_ord), Tipo_controle = tipo_controle
 
 
 # ==============================================================================
-# SEÇÃO 14 — REDES: GRAFO DE VISUALIZAÇÃO (NET COLAPSADO, THRESHOLD RELATIVO)
+# SEÇÃO 15 — REDES: GRAFO DE VISUALIZAÇÃO (NET COLAPSADO, THRESHOLD RELATIVO)
 # ==============================================================================
 
 cat("\n[14] Construindo grafo de visualização (NET colapsado, threshold relativo",
