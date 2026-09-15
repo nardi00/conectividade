@@ -43,10 +43,20 @@ P_LAGS        <- 2
 THRESHOLD_REL <- 0.05   # threshold relativo do grafo NET colapsado (Seção 14)
 
 EVENTOS <- data.frame(
-  data  = as.Date(c("2020-03-11", "2022-01-01", "2023-01-12", "2024-10-01")),
+  data  = as.Date(c("2020-03-11", "2021-03-17", "2023-01-12", "2024-10-01")),
   label = c("COVID-19", "Aperto Selic", "Americanas", "Crise Fiscal 2024"),
   stringsAsFactors = FALSE
 )
+
+# ==============================================================================
+# ── Checagem de diretório de trabalho ───────────────────────────────────────
+if (!file.exists(CAMINHO_EXCEL)) {
+  stop(
+    "Arquivo não encontrado: '", CAMINHO_EXCEL, "'\n",
+    "  Working directory atual: ", getwd(), "\n",
+    "  Rode setwd() para a pasta que contém o Excel e o script, ou ajuste CAMINHO_EXCEL."
+  )
+}
 
 # ==============================================================================
 # SEÇÃO 1 — LEITURA DOS DADOS (EXCEL)
@@ -130,7 +140,9 @@ cat("  OK - sanity checks concluídos.\n")
 
 cat("\n[3/11] Aplicando filtro de liquidez...\n")
 
-# Sem volume em quantidade de ações no ComDinheiro — só piso de volume financeiro.
+# Filtro por volume financeiro (Volume_MM_RS). A planilha também tem a
+# coluna Negocios (número de negócios do dia) como possível critério
+# complementar de liquidez, não incorporado aqui ainda.
 VOLUME_MIN_BRL <- 100000
 
 for (nome in NOMES) {
@@ -206,19 +218,36 @@ if (nrow(relatorio_outliers) > 0) {
   cat("  Nenhum outlier com |z| > 5 encontrado.\n")
 }
 
+# ── Correlação BPAN4 x BPAC11 — pré/pós anúncio de incorporação ────────────
+if (all(c("BPAN4", "BPAC11") %in% NOMES)) {
+  ANUNCIO_INCORPORACAO <- as.Date("2025-10-14")
+  
+  ret_bpan4  <- diff(log(as.numeric(dados_adj[["BPAN4"]]$Close)))
+  ret_bpac11 <- diff(log(as.numeric(dados_adj[["BPAC11"]]$Close)))
+  ret_df <- na.omit(data.frame(
+    data = index(dados_adj[["BPAN4"]])[-1], bpan4 = ret_bpan4, bpac11 = ret_bpac11
+  ))
+  
+  pre <- ret_df[ret_df$data <  ANUNCIO_INCORPORACAO, ]
+  pos <- ret_df[ret_df$data >= ANUNCIO_INCORPORACAO, ]
+  
+  cor_pre <- cor(pre$bpan4, pre$bpac11)
+  cor_pos <- if (nrow(pos) >= 2) cor(pos$bpan4, pos$bpac11) else NA
+  
+  cat("\n  Correlação BPAN4 x BPAC11 (retornos diários):\n")
+  cat("    Antes de", as.character(ANUNCIO_INCORPORACAO), ":", round(cor_pre, 3), "(n =", nrow(pre), ")\n")
+  cat("    A partir de", as.character(ANUNCIO_INCORPORACAO), ":", round(cor_pos, 3), "(n =", nrow(pos), ")\n")
+}
+
 
 # ==============================================================================
 # SEÇÃO 5 — ESTIMAÇÃO DA VOLATILIDADE: ROGERS-SATCHELL + OVERNIGHT
 # ==============================================================================
-# Yang-Zhang (janela de 21 dias) substituído por Rogers-Satchell + termo
-# overnight, estimador de 1 dia sem sobreposição (Feedback 3, Seção 3.1).
-# A janela de 21 dias atualizada diariamente fazia observações consecutivas
-# compartilharem 20 de 21 dias, o que induzia autocorrelação mecânica de
-# ~-0,42 na defasagem 21 (não fato econômico) — isso contaminava os
-# resíduos do VAR e violava a hipótese por trás da GFEVD. O estimador de 1
-# dia elimina esse artefato por construção, além de não ter NAs de
-# aquecimento de janela e ser independente de drift (ao contrário de
-# Garman-Klass, mantido como comparação no apêndice).
+# Estimador de 1 dia, sem sobreposição — evita a autocorrelação mecânica na
+# defasagem 21 que uma janela deslizante atualizada diariamente induziria
+# (observações consecutivas compartilhando 20 de 21 dias). Sem NAs de
+# aquecimento de janela; independente de drift (ao contrário de
+# Garman-Klass, mantido como comparação comentada abaixo).
 
 cat("\n[5/11] Estimando volatilidade Rogers-Satchell + overnight...\n")
 
@@ -239,8 +268,8 @@ rogers_satchell_overnight <- function(ohlc_mat) {
   sqrt(sig2)                                    # desvio-padrão diário, não anualizado
 }
 
-# Apêndice (não usado na especificação principal, mantido para a tabela
-# comparativa do Feedback 3): Garman-Klass, convenção Diebold-Yilmaz.
+# Apêndice (não usado na especificação principal): Garman-Klass, convenção
+# Diebold-Yilmaz.
 # garman_klass <- function(ohlc_mat) {
 #   O <- as.numeric(ohlc_mat[, "Open"]); H <- as.numeric(ohlc_mat[, "High"])
 #   L <- as.numeric(ohlc_mat[, "Low"]);  C <- as.numeric(ohlc_mat[, "Close"])
@@ -322,10 +351,6 @@ write.csv(data.frame(data = index(painel_imp), as.data.frame(painel_imp)),
 # ==============================================================================
 # SEÇÃO 8 — TESTES DE ESTACIONARIEDADE E MEMÓRIA LONGA (PAINEL PÓS-KALMAN)
 # ==============================================================================
-# Feedback 3, Seção 3.7: os testes rodavam sobre a série pré-imputação com
-# na.omit(), que emenda segmentos não contíguos (cola o dia 50 direto no
-# dia 73 se o meio virou NA). Agora rodam sobre painel_imp — o painel que o
-# VAR de fato usa, já contínuo e sem NA por construção (Seção 7).
 
 cat("\n[8/11] Testes de estacionariedade e memória longa (painel pós-Kalman)...\n")
 
@@ -402,7 +427,7 @@ if (length(falhas_pp) > 0)    warning("Phillips-Perron NÃO rejeitou raiz unitá
 if (length(falhas_za) > 0)    warning("Zivot-Andrews NÃO rejeitou raiz unitária em: ", paste(falhas_za, collapse=", "))
 
 cat("\n  Nota: ADF rejeitando e KPSS não rejeitando simultaneamente (comum aqui)\n",
-    "  não é contradição — é a assinatura de memória longa (0 < d < 1), não de\n",
+    "  não é contradição, é a assinatura de memória longa (0 < d < 1), não de\n",
     "  raiz unitária. Ver coluna GPH_d.\n")
 
 write.csv(resultados_testes, "outputs/tabelas/testes_estacionariedade.csv", row.names = FALSE)
@@ -499,12 +524,10 @@ cat("  Tabelas salvas.\n")
 # ==============================================================================
 # SEÇÃO 11 (APÊNDICE) — JANELA ROLANTE (W = 200, H = 10)
 # ==============================================================================
-# Feedback 3, Seção 3.2: a janela rolante data o pico de conectividade na
-# borda direita da janela (quando ela está mais cheia de dados de crise),
-# não na data do evento real — desloca a datação da crise em ~8 meses.
-# Mantida aqui como comparação com a convenção de Diebold-Yilmaz (2012),
-# mas a especificação dinâmica PRINCIPAL passa a ser o TVP-VAR com fatores
-# de esquecimento (Seção 12).
+# A janela rolante data o pico de conectividade na borda direita da janela
+# (quando ela está mais cheia de dados de crise), não na data do evento
+# real. Mantida como comparação com a convenção de Diebold-Yilmaz (2012);
+# a especificação dinâmica principal é o TVP-VAR (Seção 12).
 
 cat("\n[11/11 — apêndice] Janela rolante (W =", N_JANELA_W, ", H =", H_HORIZONTE, ")...\n")
 
@@ -556,16 +579,20 @@ cat("  Gráfico TCI salvo.\n")
 net_df <- data.frame(data = datas_roll, as.data.frame(net_rolling)) |>
   pivot_longer(-data, names_to = "Banco", values_to = "NET")
 
+teto_net <- max(abs(net_df$NET), na.rm = TRUE)
+
 p_net <- ggplot(net_df, aes(x = data, y = NET, color = Banco)) +
   geom_line(linewidth = 0.5, alpha = 0.85) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.4) +
   geom_vline(data = EVENTOS, aes(xintercept = as.numeric(data)),
              linetype = "dotted", color = "grey50", linewidth = 0.4, inherit.aes = FALSE) +
-  facet_wrap(~Banco, ncol = 4, scales = "free_y") +
+  geom_text(data = EVENTOS, aes(x = data, y = teto_net * 0.92, label = label),
+            angle = 90, hjust = 1, vjust = -0.3, size = 2.2, color = "grey30", inherit.aes = FALSE) +
+  facet_wrap(~Banco, ncol = 4) +
   scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
-  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  scale_y_continuous(labels = function(x) paste0(x, "%"), limits = c(-teto_net, teto_net)) +
   labs(title = "Spillover NET por instituição — janela rolante (W = 200)",
-       subtitle = "Positivo = transmissor líquido; negativo = receptor líquido",
+       subtitle = "Positivo = transmissor líquido; negativo = receptor líquido. Escala fixa entre painéis.",
        x = NULL, y = "NET (%)") +
   theme_minimal(base_size = 10) +
   theme(legend.position = "none", strip.text = element_text(face = "bold"),
@@ -576,10 +603,10 @@ ggsave("outputs/graficos/net_rolling.png", p_net, width = 14, height = 8, dpi = 
 cat("  Gráfico NET salvo.\n")
 
 # ── Figura comparativa: TCI para W = 150, 200, 250 sobrepostos ─────────────
-# Feedback 3, Seção 3.2: demonstra que o degrau/pico do TCI se desloca junto
-# com o tamanho da janela — evidência de artefato de estimação, não mudança
-# de regime. W=200 já foi calculado acima (dca_roll/tci_rolling); faltam
-# W=150 e W=250, com o mesmo estimador, defasagens e horizonte.
+# Demonstra que o degrau/pico do TCI se desloca junto com o tamanho da
+# janela — evidência de artefato de estimação, não mudança de regime.
+# W=200 já foi calculado acima (dca_roll/tci_rolling); faltam W=150 e
+# W=250, com o mesmo estimador, defasagens e horizonte.
 
 cat("\n  Rodando janelas adicionais para a figura comparativa (W = 150, 250)...\n")
 
@@ -605,8 +632,8 @@ tci_comparacao$W <- factor(tci_comparacao$W, levels = c("W = 150", "W = 200", "W
 write.csv(tci_comparacao, "outputs/tabelas/tci_comparacao_janelas.csv", row.names = FALSE)
 
 # Data em que o colapso deixa cada janela: observação do colapso (fim do
-# período, 23/03/2020) + W pregões. Índice na série diária do painel
-# (não na série já defasada pela janela), como o parecer especifica.
+# período, 23/03/2020) + W pregões. Índice na série diária do painel, não
+# na série já defasada pela janela.
 COLAPSO_REF <- as.Date("2020-03-23")
 datas_painel <- index(painel_imp)
 idx_colapso  <- which(datas_painel >= COLAPSO_REF)[1]
@@ -666,19 +693,19 @@ cat("  Gráfico comparativo (W = 150/200/250) salvo.\n")
 # ==============================================================================
 # SEÇÃO 12 — TVP-VAR COM FATORES DE ESQUECIMENTO (ESPECIFICAÇÃO PRINCIPAL)
 # ==============================================================================
-# Feedback 3, Seção 3.2. Substitui a janela rolante como especificação
-# dinâmica principal. Em vez de um corte abrupto após W dias, os
-# coeficientes do VAR (beta_t) e a covariância dos choques (Sigma_t) evoluem
-# por fatores de esquecimento kappa1 e kappa2, sem descontinuidade e sem
-# perder as primeiras observações da amostra. kappa1 governa a velocidade
-# de deriva dos coeficientes (Eq. 3); kappa2, a velocidade de adaptação da
-# covariância (Eq. 4).
+# Substitui a janela rolante como especificação dinâmica principal. Em vez
+# de um corte abrupto após W dias, os coeficientes do VAR (beta_t) e a
+# covariância dos choques (Sigma_t) evoluem por fatores de esquecimento
+# kappa1 e kappa2, sem descontinuidade e sem perder as primeiras
+# observações da amostra. kappa1 governa a velocidade de deriva dos
+# coeficientes (Eq. 3); kappa2, a velocidade de adaptação da covariância
+# (Eq. 4).
 #
 # O pacote ConnectednessApproach estima o TVP-VAR final dado (kappa1,
 # kappa2) — isso é só um argumento de função. O que NÃO existe pronto é a
 # SELEÇÃO de kappa1/kappa2: implementamos abaixo o filtro de Kalman com
 # fatores de esquecimento (Eq. 1-6) para rodar a grade e escolher o par por
-# verossimilhança preditiva fora da amostra, exatamente como descrito.
+# verossimilhança preditiva fora da amostra.
 #
 # AVISO DE DESEMPENHO: a grade tem 6 x 3 = 18 combinações, cada uma rodando
 # o filtro sobre a amostra inteira (~1700 observações, estado de dimensão
@@ -690,7 +717,7 @@ cat("\n[12] TVP-VAR — seleção de fatores de esquecimento por verossimilhanç
 Y_mat <- as.matrix(painel_imp)
 N     <- ncol(Y_mat)
 Tt    <- nrow(Y_mat)
-T0    <- 200   # observações de treino (Feedback 3.2, passo 2)
+T0    <- 200   # observações de treino
 
 var_treino <- vars::VAR(Y_mat[1:T0, ], p = P_LAGS, type = "const")
 
@@ -752,7 +779,7 @@ tvpvar_loglik <- function(Y_mat, p, kappa1, kappa2, t0, beta0, P0, Sigma0) {
   loglik
 }
 
-# ── Passo 3: grade e verossimilhança preditiva (Feedback 3.2, passos 1-4) ──
+# ── Passo 3: grade e verossimilhança preditiva ──────────────────────────────
 grade_k1 <- c(0.94, 0.96, 0.98, 0.99, 0.995, 1.00)
 grade_k2 <- c(0.94, 0.96, 0.99)
 
@@ -766,7 +793,7 @@ for (i in seq_len(nrow(grade))) {
   cat("logL =", round(ll, 1), "\n")
 }
 
-# ── Passo 4: pesos posteriores (Feedback 3.2, passo 5) ──────────────────────
+# ── Passo 4: pesos posteriores ───────────────────────────────────────────────
 grade$loglik_rel <- grade$loglik - max(grade$loglik)   # subtrai o máximo antes de exponenciar
 grade$peso_post  <- exp(grade$loglik_rel) / sum(exp(grade$loglik_rel))
 
@@ -923,11 +950,13 @@ V(g_full)$name <- NOMES
 
 cat("\n[15] Calculando métricas de centralidade (grafo completo)...\n")
 
-# igraph trata peso como distância — inverte para que conexão forte = caminho curto.
-betweenness_full <- igraph::betweenness(g_full, directed = TRUE, weights = 1 / E(g_full)$weight)
+# Betweenness não incluída: não é interpretável em grafo completo — com
+# as 56 arestas dirigidas todas presentes, os valores saem como ruído de
+# baixa magnitude, sem leitura econômica. Métricas baseadas em força/peso.
 
 # eigen_centrality(directed=TRUE) já é a versão "in" por construção (nó
-# importante se é apontado por nós importantes) — sem ajuste manual.
+# importante se é apontado por nós importantes) — sem ajuste manual. Ou
+# seja: mede o quanto o banco RECEBE de bancos importantes, não transmite.
 eigen_full <- igraph::eigen_centrality(g_full, directed = TRUE)$vector
 
 # PageRank segue a direção j -> i por padrão, mesma lógica desejada.
@@ -935,7 +964,6 @@ pagerank_full <- igraph::page_rank(g_full, directed = TRUE, weights = E(g_full)$
 
 metricas_centralidade <- data.frame(
   Banco = V(g_full)$name,
-  Betweenness    = round(betweenness_full[V(g_full)$name], 4),
   Eigenvector_in = round(eigen_full[V(g_full)$name], 4),
   PageRank       = round(pagerank_full[V(g_full)$name], 4)
 )
@@ -947,6 +975,18 @@ print(metricas_centralidade)
 
 write.csv(metricas_centralidade, "outputs/tabelas/centralidade_fullsample.csv", row.names = FALSE)
 cat("  Salvo em outputs/tabelas/centralidade_fullsample.csv\n")
+
+# Consolida TO/FROM/NET (Seção 10) com as métricas de centralidade numa
+# tabela só.
+tabela_dy_rede <- merge(tabela_dy, metricas_centralidade, by = "Banco")
+tabela_dy_rede <- tabela_dy_rede[order(-tabela_dy_rede$TO), ]
+rownames(tabela_dy_rede) <- NULL
+
+cat("\n  Tabela consolidada (DY + centralidade):\n")
+print(tabela_dy_rede)
+
+write.csv(tabela_dy_rede, "outputs/tabelas/dy_centralidade_fullsample.csv", row.names = FALSE)
+cat("  Salvo em outputs/tabelas/dy_centralidade_fullsample.csv\n")
 
 # Classificação manual (Seção 6.1.1) para assortatividade por tipo de controle.
 tipo_controle <- c(
@@ -978,10 +1018,7 @@ cat("\n[16] Construindo grafo de visualização (NET colapsado, threshold relati
 npdc <- adj_full - theta_offdiag
 stopifnot("npdc deveria ser antissimétrica" = all(abs(npdc + t(npdc)) < 1e-12))
 
-# NETij (diferença) é estruturalmente menor que theta_ij bruto e se dilui
-# entre até 7 contrapartes — um threshold absoluto pensado para o grafo
-# bruto (Opção A) poda quase tudo e isola nós. Por isso usamos corte
-# relativo ao par mais forte observado.
+
 pares <- combn(NOMES, 2, simplify = FALSE)
 dist_netij <- data.frame(
   par   = sapply(pares, function(p) paste(p, collapse = "-")),
@@ -1023,11 +1060,11 @@ p_rede <- ggraph(layout_fr) +
     arrow = arrow(length = unit(3, "mm"), type = "closed"),
     end_cap = circle(6, "mm"), color = "grey40"
   ) +
-  scale_edge_width(range = c(0.3, 2.5), guide = "none") +
-  scale_edge_alpha(range = c(0.4, 0.9), guide = "none") +
-  geom_node_point(aes(size = sqrt(TO), fill = NET), shape = 21, color = "black", stroke = 0.6) +
-  scale_size_continuous(range = c(6, 16), guide = "none") +
-  scale_fill_gradient2(low = "#2166ac", mid = "white", high = "#b2182b", midpoint = 0, name = "NET (%)") +
+  scale_edge_width(range = c(0.3, 2.5), name = "Peso do fluxo (p.p.)") +
+  scale_edge_alpha(range = c(0.4, 0.9), guide = "none") +   # redundante com a espessura, sem legenda própria
+  geom_node_point(aes(size = sqrt(TO), fill = Tipo), shape = 21, color = "black", stroke = 0.6) +
+  scale_size_continuous(range = c(6, 16), name = "TOi (√, p.p.)") +
+  scale_fill_brewer(palette = "Set2", name = "Tipo de controle") +
   geom_node_text(aes(label = name), vjust = -1.6, size = 4, fontface = "bold") +
   labs(
     title = "Rede de conectividade — Sistema Bancário Brasileiro (full sample, 2019-2025)",
@@ -1044,5 +1081,14 @@ p_rede <- ggraph(layout_fr) +
     legend.background = element_rect(fill = "white", color = NA)
   )
 
-ggsave("outputs/graficos/rede_full_sample.png", p_rede, width = 10, height = 8, dpi = 300, bg = "white")
+ggsave("outputs/graficos/rede_full_sample.png", p_rede, width = 11, height = 8, dpi = 300, bg = "white")
 cat("  Grafo salvo em outputs/graficos/rede_full_sample.png\n")
+
+
+# ==============================================================================
+# REPRODUTIBILIDADE — sessionInfo()
+# ==============================================================================
+# Versões de pacote afetam resultados de auto.arima() (Seção 7) e do layout
+# Fruchterman-Reingold (Seção 16) — salvar para referência.
+writeLines(capture.output(sessionInfo()), "outputs/sessionInfo.txt")
+cat("\n  sessionInfo() salva em outputs/sessionInfo.txt\n")
