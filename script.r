@@ -988,23 +988,64 @@ print(tabela_dy_rede)
 write.csv(tabela_dy_rede, "outputs/tabelas/dy_centralidade_fullsample.csv", row.names = FALSE)
 cat("  Salvo em outputs/tabelas/dy_centralidade_fullsample.csv\n")
 
-# Classificação manual (Seção 6.1.1) para assortatividade por tipo de controle.
+# Classificação manual (Seção 6.1.1) — usada aqui e no preenchimento dos
+# nós da Seção 16.
 tipo_controle <- c(
   ITUB4 = "Privado nacional", BBDC4 = "Privado nacional",
   BBAS3 = "Público federal", SANB11 = "Privado estrangeiro",
   BPAC11 = "Privado nacional (BTG)", BRSR6 = "Público estadual",
   ABCB4 = "Privado estrangeiro", BPAN4 = "Privado nacional (BTG)"
 )
-tipo_controle_ord <- tipo_controle[V(g_full)$name]
 
-assortatividade_controle <- igraph::assortativity_nominal(
-  g_full, types = as.integer(factor(tipo_controle_ord)), directed = TRUE
+# Porte: grande (Itaú, Bradesco, BB, Santander, BTG) vs. médio (Banrisul,
+# ABC Brasil, Banco Pan).
+porte <- c(
+  ITUB4 = "Grande", BBDC4 = "Grande", BBAS3 = "Grande", SANB11 = "Grande",
+  BPAC11 = "Grande", BRSR6 = "Médio", ABCB4 = "Médio", BPAN4 = "Médio"
 )
 
-cat("\n  Assortatividade por tipo de controle institucional:", round(assortatividade_controle, 4), "\n")
-cat("  (positivo = mesmo tipo se conecta mais entre si; negativo = predomina entre tipos diferentes)\n")
-cat("\n  Classificação usada:\n")
-print(data.frame(Banco = names(tipo_controle_ord), Tipo_controle = tipo_controle_ord), row.names = FALSE)
+# ── Regressão diádica (substitui a assortatividade) ────────────────────────
+# Unidade de observação: o par ordenado (i,j), i != j — 56 linhas (8x7).
+# Variável dependente: theta_ij x 100 (Eq. 9). alpha_j e gamma_i são
+# efeitos fixos de emissor e receptor — absorvem a propensão geral de cada
+# banco a transmitir/receber de QUALQUER contraparte. O que sobra em
+# mesmo_controle/ambos_grande é o que aquele PAR específico tem de
+# particular, descontada essa propensão geral.
+cat("\n  Montando painel diádico (pares i != j)...\n")
+
+pares_ij <- expand.grid(receptor = NOMES, emissor = NOMES, stringsAsFactors = FALSE)
+pares_ij <- pares_ij[pares_ij$receptor != pares_ij$emissor, ]
+
+pares_ij$theta_pct       <- mapply(function(i, j) theta_offdiag[i, j] * 100,
+                                   pares_ij$receptor, pares_ij$emissor)
+pares_ij$mesmo_controle  <- as.integer(tipo_controle[pares_ij$receptor] == tipo_controle[pares_ij$emissor])
+pares_ij$ambos_grande    <- as.integer(porte[pares_ij$receptor] == "Grande" & porte[pares_ij$emissor] == "Grande")
+pares_ij$par_id          <- apply(cbind(pares_ij$receptor, pares_ij$emissor), 1, function(x) paste(sort(x), collapse = "-"))
+
+cat("  ", nrow(pares_ij), "observações (pares dirigidos),", length(unique(pares_ij$par_id)), "pares não-dirigidos (clusters)\n")
+
+lm_diadica <- lm(theta_pct ~ factor(emissor) + factor(receptor) + mesmo_controle + ambos_grande,
+                 data = pares_ij)
+
+# Erros-padrão clusterizados por par não-dirigido: theta_ij e theta_ji
+# nascem da mesma relação bilateral, resíduos não são independentes.
+vcov_cluster <- sandwich::vcovCL(lm_diadica, cluster = pares_ij$par_id)
+teste_diadica <- lmtest::coeftest(lm_diadica, vcov = vcov_cluster)
+
+resultado_diadica <- data.frame(
+  Indicadora  = c("Mesmo tipo de controle", "Ambos de grande porte"),
+  Coeficiente = round(teste_diadica[c("mesmo_controle", "ambos_grande"), "Estimate"], 3),
+  Erro_padrao = round(teste_diadica[c("mesmo_controle", "ambos_grande"), "Std. Error"], 3),
+  t           = round(teste_diadica[c("mesmo_controle", "ambos_grande"), "t value"], 2),
+  p           = round(teste_diadica[c("mesmo_controle", "ambos_grande"), "Pr(>|t|)"], 4)
+)
+
+cat("\n  Regressão diádica — coeficientes de interesse (p.p. de variância explicada):\n")
+print(resultado_diadica, row.names = FALSE)
+
+write.csv(resultado_diadica, "outputs/tabelas/regressao_diadica_fullsample.csv", row.names = FALSE)
+write.csv(pares_ij, "outputs/tabelas/painel_diadico.csv", row.names = FALSE)
+cat("  Tabelas salvas.\n")
 
 
 # ==============================================================================
