@@ -842,7 +842,16 @@ print(grade_tabela, row.names = FALSE)
 
 write.csv(grade_tabela, "outputs/tabelas/tvpvar_grade_kappa.csv", row.names = FALSE)
 
-melhor <- grade_tabela[1, ]
+# kappa1 = 1 (coeficientes constantes) é caso de fronteira que nosso filtro
+# de Kalman lida bem na busca em grade, mas o ConnectednessApproach exige
+# kappa1 ESTRITAMENTE entre 0 e 1 para estimar o TVP-VAR final — excluído
+# antes de escolher o vencedor.
+if (grade_tabela$kappa1[1] >= 1 && any(grade_tabela$kappa1 < 1)) {
+  warning("kappa1 = 1 teve o maior peso posterior, mas não pode ser usado no ",
+          "ConnectednessApproach (exige kappa1 < 1). Selecionando o melhor par ",
+          "com kappa1 < 1 em seu lugar.")
+}
+melhor <- grade_tabela[grade_tabela$kappa1 < 1, ][1, ]
 KAPPA1 <- melhor$kappa1
 KAPPA2 <- melhor$kappa2
 cat("\n  Par selecionado: kappa1 =", KAPPA1, ", kappa2 =", KAPPA2,
@@ -1351,6 +1360,144 @@ p_rede <- ggraph(layout_fr) +
 
 ggsave("outputs/graficos/rede_full_sample.png", p_rede, width = 11, height = 8, dpi = 300, bg = "white")
 cat("  Grafo salvo em outputs/graficos/rede_full_sample.png\n")
+
+
+# ==============================================================================
+# SEÇÃO 17 (APÊNDICE) — ROBUSTEZ
+# ==============================================================================
+# Sensibilidade do TCI e do ranking de transmissor/receptor líquido a cinco
+# dimensões: número de defasagens (p), horizonte da GFEVD (H), tamanho da
+# janela rolante (W), fatores de esquecimento (kappa1/kappa2) e sub-amostras.
+# Em cada bloco, reestima e reporta TCI + o banco com maior NET (transmissor
+# líquido) e menor NET (receptor líquido) — a pergunta é se essa identidade
+# se mantém estável entre as variações, não só se o TCI muda de nível.
+
+cat("\n[17 — apêndice] Robustez...\n")
+
+# ── A. Sensibilidade ao número de defasagens (p) ────────────────────────────
+cat("\n  A) Variando p (defasagens do VAR, full sample estático)...\n")
+
+robustez_p <- data.frame()
+for (p_alt in 1:4) {
+  dca_p <- ConnectednessApproach(Y, nlag = p_alt, nfore = H_HORIZONTE, window = NULL,
+                                 corrected = FALSE, model = "VAR")
+  net_p <- as.numeric(dca_p$NET)
+  robustez_p <- rbind(robustez_p, data.frame(
+    p = p_alt, TCI = round(dca_p$TCI, 2),
+    Maior_transmissor = NOMES[which.max(net_p)], Maior_receptor = NOMES[which.min(net_p)]
+  ))
+}
+cat("  Resultado:\n"); print(robustez_p, row.names = FALSE)
+write.csv(robustez_p, "outputs/tabelas/robustez_lags.csv", row.names = FALSE)
+
+# ── B. Sensibilidade ao horizonte da GFEVD (H) ──────────────────────────────
+cat("\n  B) Variando H (horizonte da GFEVD, full sample estático)...\n")
+
+robustez_h <- data.frame()
+for (h_alt in c(5, 10, 15, 20)) {
+  dca_h <- ConnectednessApproach(Y, nlag = P_LAGS, nfore = h_alt, window = NULL,
+                                 corrected = FALSE, model = "VAR")
+  net_h <- as.numeric(dca_h$NET)
+  robustez_h <- rbind(robustez_h, data.frame(
+    H = h_alt, TCI = round(dca_h$TCI, 2),
+    Maior_transmissor = NOMES[which.max(net_h)], Maior_receptor = NOMES[which.min(net_h)]
+  ))
+}
+cat("  Resultado:\n"); print(robustez_h, row.names = FALSE)
+write.csv(robustez_h, "outputs/tabelas/robustez_horizonte.csv", row.names = FALSE)
+
+# ── C. Sensibilidade ao tamanho da janela rolante (W) ───────────────────────
+# Reaproveita as três séries já calculadas na Seção 11 (tci_comparacao).
+cat("\n  C) Variando W (janela rolante) — reaproveitando Seção 11...\n")
+
+robustez_w <- aggregate(TCI ~ W, data = tci_comparacao,
+                        FUN = function(x) c(media = mean(x, na.rm = TRUE), dp = sd(x, na.rm = TRUE)))
+robustez_w <- do.call(data.frame, robustez_w)
+colnames(robustez_w) <- c("W", "TCI_medio", "TCI_dp")
+robustez_w$TCI_medio <- round(robustez_w$TCI_medio, 2)
+robustez_w$TCI_dp    <- round(robustez_w$TCI_dp, 2)
+
+# Correlação entre pares de séries (alinhadas por data em comum)
+wide_w <- tci_comparacao %>% pivot_wider(names_from = W, values_from = TCI) %>% na.omit()
+cor_w <- cor(wide_w[, c("W = 150", "W = 200", "W = 250")])
+
+cat("  TCI médio/DP por janela:\n"); print(robustez_w, row.names = FALSE)
+cat("  Correlação entre séries (datas em comum):\n"); print(round(cor_w, 3))
+write.csv(robustez_w, "outputs/tabelas/robustez_janela.csv", row.names = FALSE)
+
+# ── D. Sensibilidade aos fatores de esquecimento (kappa1, kappa2) ──────────
+# Reestima só os 2 próximos pares mais bem colocados na grade (Seção 12) —
+# o vencedor (KAPPA1/KAPPA2) já foi calculado como dca_tvp e é reaproveitado.
+# AVISO: cada par não reaproveitado roda o TVP-VAR completo de novo — pode
+# levar alguns minutos por par.
+cat("\n  D) Variando (kappa1, kappa2) — top 3 da grade de verossimilhança...\n")
+
+# kappa1 = 1 (coeficientes constantes) é um caso de fronteira que nosso
+# filtro de Kalman (usado só para a busca em grade) lida bem, mas o
+# ConnectednessApproach exige kappa1 ESTRITAMENTE entre 0 e 1 para estimar
+# o TVP-VAR de fato — excluído aqui antes de escolher o top 3 a reestimar.
+top3_kappa <- head(grade_tabela[grade_tabela$kappa1 < 1, ], 3)
+robustez_kappa <- data.frame()
+
+for (i in seq_len(nrow(top3_kappa))) {
+  k1 <- top3_kappa$kappa1[i]; k2 <- top3_kappa$kappa2[i]
+  
+  if (isTRUE(all.equal(k1, KAPPA1)) && isTRUE(all.equal(k2, KAPPA2))) {
+    dca_k <- dca_tvp   # já calculado na Seção 12
+  } else {
+    cat("    Estimando TVP-VAR para kappa1 =", k1, ", kappa2 =", k2, "...\n")
+    dca_k <- ConnectednessApproach(
+      Y, nlag = P_LAGS, nfore = H_HORIZONTE, model = "TVP-VAR", connectedness = "Time",
+      VAR_config = list(TVPVAR = list(kappa1 = k1, kappa2 = k2, prior = "BayesPrior", gamma = 0.01))
+    )
+  }
+  
+  tci_k <- as.numeric(dca_k$TCI[, 1])
+  net_medio_k <- colMeans(dca_k$NET)
+  
+  robustez_kappa <- rbind(robustez_kappa, data.frame(
+    kappa1 = k1, kappa2 = k2, peso_posterior = round(top3_kappa$peso_post[i], 4),
+    TCI_medio = round(mean(tci_k, na.rm = TRUE), 2),
+    Maior_transmissor = NOMES[which.max(net_medio_k)], Maior_receptor = NOMES[which.min(net_medio_k)]
+  ))
+}
+cat("  Resultado:\n"); print(robustez_kappa, row.names = FALSE)
+write.csv(robustez_kappa, "outputs/tabelas/robustez_kappa.csv", row.names = FALSE)
+
+# ── E. Sub-amostras (primeira vs. segunda metade do período) ───────────────
+cat("\n  E) Sub-amostras — primeira vs. segunda metade do período...\n")
+
+n_total <- nrow(Y)
+meio    <- floor(n_total / 2)
+Y_primeira <- Y[1:meio, ]
+Y_segunda  <- Y[(meio + 1):n_total, ]
+
+robustez_sub <- data.frame()
+for (nome_sub in c("Primeira metade", "Segunda metade")) {
+  Y_sub <- if (nome_sub == "Primeira metade") Y_primeira else Y_segunda
+  dca_sub <- ConnectednessApproach(Y_sub, nlag = P_LAGS, nfore = H_HORIZONTE, window = NULL,
+                                   corrected = FALSE, model = "VAR")
+  net_sub <- as.numeric(dca_sub$NET)
+  robustez_sub <- rbind(robustez_sub, data.frame(
+    Subamostra = nome_sub,
+    Periodo = paste(as.character(index(Y_sub)[1]), "a", as.character(index(Y_sub)[nrow(Y_sub)])),
+    TCI = round(dca_sub$TCI, 2),
+    Maior_transmissor = NOMES[which.max(net_sub)], Maior_receptor = NOMES[which.min(net_sub)]
+  ))
+}
+cat("  Resultado:\n"); print(robustez_sub, row.names = FALSE)
+write.csv(robustez_sub, "outputs/tabelas/robustez_subamostras.csv", row.names = FALSE)
+
+# ── Checagem final: a identidade do maior transmissor/receptor se mantém? ──
+transmissores <- c(robustez_p$Maior_transmissor, robustez_h$Maior_transmissor,
+                   robustez_kappa$Maior_transmissor, robustez_sub$Maior_transmissor)
+receptores    <- c(robustez_p$Maior_receptor, robustez_h$Maior_receptor,
+                   robustez_kappa$Maior_receptor, robustez_sub$Maior_receptor)
+
+cat("\n  Estabilidade do maior transmissor líquido em", length(transmissores), "especificações:\n")
+print(table(transmissores))
+cat("\n  Estabilidade do maior receptor líquido em", length(receptores), "especificações:\n")
+print(table(receptores))
 
 
 # ==============================================================================
