@@ -26,6 +26,7 @@ library(tidyr)
 library(scales)
 library(sandwich)
 library(lmtest)
+library(patchwork)
 
 dir.create("outputs/tabelas",  recursive = TRUE, showWarnings = FALSE)
 dir.create("outputs/graficos", recursive = TRUE, showWarnings = FALSE)
@@ -1036,6 +1037,33 @@ print(tabela_dy_rede)
 write.csv(tabela_dy_rede, "outputs/tabelas/dy_centralidade_fullsample.csv", row.names = FALSE)
 cat("  Salvo em outputs/tabelas/dy_centralidade_fullsample.csv\n")
 
+# ── Confronto com a segmentação prudencial do BCB ───────────────────────────
+# O BCB não publica uma lista numerada de D-SIBs (diferente de jurisdições
+# como Índia/RBI) — usa a segmentação prudencial S1-S5 (Res. CMN, baseada
+# no arcabouço de Basileia). O segmento S1 (exposição >=10% do PIB ou
+# atividade internacional relevante) é sujeito integralmente aos buffers de
+# capital sistêmico de Basileia e funciona como o equivalente brasileiro ao
+# D-SIB. Fonte: bcb.gov.br/estabilidadefinanceira/regprudencialsegmentacao
+# (S1: Banco do Brasil, Bradesco, BTG Pactual, Caixa Econômica Federal,
+# Itaú, Santander; S2 inclui o Banrisul).
+segmento_bcb <- c(
+  ITUB4 = "S1", BBDC4 = "S1", BBAS3 = "S1", SANB11 = "S1", BPAC11 = "S1",
+  BRSR6 = "S2", ABCB4 = "S3", BPAN4 = "S3"
+)
+
+comparacao_dsib <- metricas_centralidade
+comparacao_dsib$Segmento_BCB <- segmento_bcb[comparacao_dsib$Banco]
+comparacao_dsib$S1_BCB       <- comparacao_dsib$Segmento_BCB == "S1"
+comparacao_dsib <- comparacao_dsib[order(-comparacao_dsib$PageRank), ]
+comparacao_dsib$Rank_rede_PageRank <- seq_len(nrow(comparacao_dsib))
+rownames(comparacao_dsib) <- NULL
+
+cat("\n  Confronto: ranking de rede (PageRank) vs. segmentação prudencial do BCB (S1-S5):\n")
+print(comparacao_dsib)
+
+write.csv(comparacao_dsib, "outputs/tabelas/comparacao_dsib.csv", row.names = FALSE)
+cat("  Tabela salva em outputs/tabelas/comparacao_dsib.csv\n")
+
 # Classificação manual (Seção 6.1.1) — usada aqui e no preenchimento dos
 # nós da Seção 16.
 tipo_controle <- c(
@@ -1363,7 +1391,109 @@ cat("  Grafo salvo em outputs/graficos/rede_full_sample.png\n")
 
 
 # ==============================================================================
-# SEÇÃO 17 (APÊNDICE) — ROBUSTEZ
+# SEÇÃO 17 — REDES: PAINEL DE SUBPERÍODOS (LAYOUT FIXO)
+# ==============================================================================
+# Reestima a rede NET colapsada (mesma lógica da Seção 16) em 4 subperíodos,
+# usando o layout Fruchterman-Reingold já calculado no full sample
+# (layout_fr) — fixo entre os painéis, para que diferenças visuais reflitam
+# reconfiguração da topologia, não reposicionamento dos nós.
+
+cat("\n[17] Construindo painel de subperíodos (layout fixo)...\n")
+
+SUBPERIODOS <- list(
+  "Pré-COVID"    = c("2019-08-01", "2020-02-29"),
+  "COVID-19"     = c("2020-03-01", "2020-08-31"),
+  "Aperto Selic" = c("2021-03-17", "2021-09-17"),
+  "Americanas"   = c("2023-01-12", "2023-07-12")
+)
+
+coords_fixas <- data.frame(name = layout_fr$name, x = layout_fr$x, y = layout_fr$y)
+stopifnot("Coordenadas fixas não cobrem todos os bancos" = all(NOMES %in% coords_fixas$name))
+
+construir_grafo_subperiodo <- function(data_ini, data_fim, titulo) {
+  Y_sub <- Y[index(Y) >= as.Date(data_ini) & index(Y) <= as.Date(data_fim), ]
+  
+  dca_sub <- tryCatch(
+    ConnectednessApproach(Y_sub, nlag = P_LAGS, nfore = H_HORIZONTE, window = NULL,
+                          corrected = FALSE, model = "VAR"),
+    error = function(e) NULL
+  )
+  if (is.null(dca_sub)) {
+    cat("    [", titulo, "] falhou ao estimar — pulando.\n")
+    return(NULL)
+  }
+  
+  CT_sub <- dca_sub$CT
+  nd_sub <- length(dim(CT_sub))
+  theta_sub <- if (nd_sub == 2) CT_sub
+  else if (nd_sub == 3) CT_sub[, , 1]
+  else CT_sub[, , 1, dim(CT_sub)[4]]
+  dimnames(theta_sub) <- list(NOMES, NOMES)
+  diag(theta_sub) <- 0
+  
+  adj_sub  <- t(theta_sub)
+  npdc_sub <- adj_sub - theta_sub
+  
+  g_dir_sub <- graph_from_adjacency_matrix(adj_sub, mode = "directed", weighted = TRUE, diag = FALSE)
+  to_sub    <- igraph::strength(g_dir_sub, mode = "out") * 100
+  net_sub   <- to_sub - igraph::strength(g_dir_sub, mode = "in") * 100
+  
+  pares_sub <- combn(NOMES, 2, simplify = FALSE)
+  dist_sub  <- sapply(pares_sub, function(p) abs(npdc_sub[p[1], p[2]]) * 100)
+  corte_sub <- THRESHOLD_REL * max(dist_sub) / 100
+  
+  edges_sub <- do.call(rbind, lapply(pares_sub, function(par) {
+    i <- par[1]; j <- par[2]
+    valor <- npdc_sub[i, j]
+    if (abs(valor) < corte_sub) return(NULL)
+    if (valor > 0) data.frame(from = i, to = j, weight = abs(valor) * 100)
+    else           data.frame(from = j, to = i, weight = abs(valor) * 100)
+  }))
+  
+  g_sub <- graph_from_data_frame(edges_sub, directed = TRUE, vertices = data.frame(name = NOMES))
+  V(g_sub)$TO   <- to_sub[V(g_sub)$name]
+  V(g_sub)$NET  <- net_sub[V(g_sub)$name]
+  V(g_sub)$Tipo <- tipo_controle[V(g_sub)$name]
+  
+  # Layout FIXO: coordenadas do full sample, não recalculadas por subperíodo.
+  x_fixo <- coords_fixas$x[match(V(g_sub)$name, coords_fixas$name)]
+  y_fixo <- coords_fixas$y[match(V(g_sub)$name, coords_fixas$name)]
+  layout_sub <- create_layout(g_sub, layout = "manual", x = x_fixo, y = y_fixo)
+  
+  ggraph(layout_sub) +
+    geom_edge_link(aes(width = weight), arrow = arrow(length = unit(2, "mm"), type = "closed"),
+                   end_cap = circle(4, "mm"), color = "grey40", alpha = 0.7) +
+    scale_edge_width(range = c(0.2, 1.8), guide = "none") +
+    geom_node_point(aes(size = sqrt(pmax(TO, 0)), fill = Tipo), shape = 21, color = "black", stroke = 0.5) +
+    scale_size_continuous(range = c(4, 10), guide = "none") +
+    scale_fill_brewer(palette = "Set2", guide = "none") +
+    geom_node_text(aes(label = name), size = 2.8, vjust = -1.3) +
+    labs(title = titulo, subtitle = paste0(data_ini, " a ", data_fim)) +
+    theme_void(base_size = 9) +
+    theme(plot.title = element_text(face = "bold", size = 10, hjust = 0.5),
+          plot.subtitle = element_text(size = 7, color = "grey40", hjust = 0.5),
+          plot.background = element_rect(fill = "white", color = NA))
+}
+
+paineis_sub <- mapply(
+  function(nome, datas) construir_grafo_subperiodo(datas[1], datas[2], nome),
+  names(SUBPERIODOS), SUBPERIODOS, SIMPLIFY = FALSE
+)
+paineis_sub <- Filter(Negate(is.null), paineis_sub)
+
+p_subperiodos <- wrap_plots(paineis_sub, ncol = 2) +
+  plot_annotation(
+    title = "Rede de conectividade por subperíodo — layout fixo (Fruchterman-Reingold, full sample)",
+    theme = theme(plot.title = element_text(face = "bold", size = 13),
+                  plot.background = element_rect(fill = "white", color = NA))
+  ) & theme(plot.background = element_rect(fill = "white", color = NA))
+
+ggsave("outputs/graficos/rede_subperiodos.png", p_subperiodos, width = 12, height = 10, dpi = 300, bg = "white")
+cat("  Painel de subperíodos salvo em outputs/graficos/rede_subperiodos.png (", length(paineis_sub), "de", length(SUBPERIODOS), "subperíodos estimados)\n")
+
+
+# ==============================================================================
+# SEÇÃO 18 (APÊNDICE) — ROBUSTEZ
 # ==============================================================================
 # Sensibilidade do TCI e do ranking de transmissor/receptor líquido a cinco
 # dimensões: número de defasagens (p), horizonte da GFEVD (H), tamanho da
@@ -1372,7 +1502,7 @@ cat("  Grafo salvo em outputs/graficos/rede_full_sample.png\n")
 # líquido) e menor NET (receptor líquido) — a pergunta é se essa identidade
 # se mantém estável entre as variações, não só se o TCI muda de nível.
 
-cat("\n[17 — apêndice] Robustez...\n")
+cat("\n[18 — apêndice] Robustez...\n")
 
 # ── A. Sensibilidade ao número de defasagens (p) ────────────────────────────
 cat("\n  A) Variando p (defasagens do VAR, full sample estático)...\n")

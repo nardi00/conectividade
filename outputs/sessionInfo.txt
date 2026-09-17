@@ -16,11 +16,11 @@ attached base packages:
 [1] stats     graphics  grDevices utils     datasets  methods   base     
 
 other attached packages:
- [1] scales_1.4.0                tidyr_1.3.2                 dplyr_1.2.1                 tidygraph_1.3.1             ggraph_2.2.2               
- [6] ggplot2_4.0.3               igraph_2.3.1                vars_1.6-1                  lmtest_0.9-40               strucchange_1.5-4          
-[11] sandwich_3.1-1              MASS_7.3-65                 ConnectednessApproach_1.0.4 fracdiff_1.5-4              FinTS_0.4-9                
-[16] tseries_0.10-61             urca_1.3-4                  imputeTS_3.4                xts_0.14.2                  zoo_1.8-15                 
-[21] TTR_0.24.4                  readxl_1.5.0               
+ [1] patchwork_1.3.2             scales_1.4.0                tidyr_1.3.2                 dplyr_1.2.1                 tidygraph_1.3.1            
+ [6] ggraph_2.2.2                ggplot2_4.0.3               igraph_2.3.1                vars_1.6-1                  lmtest_0.9-40              
+[11] strucchange_1.5-4           sandwich_3.1-1              MASS_7.3-65                 ConnectednessApproach_1.0.4 fracdiff_1.5-4             
+[16] FinTS_0.4-9                 tseries_0.10-61             urca_1.3-4                  imputeTS_3.4                xts_0.14.2                 
+[21] zoo_1.8-15                  TTR_0.24.4                  readxl_1.5.0               
 
 loaded via a namespace (and not attached):
   [1] RColorBrewer_1.1-3           shape_1.4.6.1                magrittr_2.0.5               farver_2.1.2                
