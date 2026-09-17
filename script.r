@@ -1,7 +1,7 @@
 # install.packages(c(
 #   "readxl", "TTR", "xts", "zoo", "imputeTS", "urca", "tseries", "FinTS",
 #   "fracdiff", "vars", "igraph", "ggraph", "tidygraph", "ggplot2", "dplyr",
-#   "tidyr", "scales", "patchwork", "ConnectednessApproach"
+#   "tidyr", "scales", "sandwich", "lmtest", "patchwork", "ConnectednessApproach"
 # ))
 
 options(xts.warn_dplyr_breaks_lag = FALSE)
@@ -24,6 +24,8 @@ library(ggplot2)
 library(dplyr)
 library(tidyr)
 library(scales)
+library(sandwich)
+library(lmtest)
 
 dir.create("outputs/tabelas",  recursive = TRUE, showWarnings = FALSE)
 dir.create("outputs/graficos", recursive = TRUE, showWarnings = FALSE)
@@ -228,16 +230,50 @@ if (all(c("BPAN4", "BPAC11") %in% NOMES)) {
     data = index(dados_adj[["BPAN4"]])[-1], bpan4 = ret_bpan4, bpac11 = ret_bpac11
   ))
   
-  pre <- ret_df[ret_df$data <  ANUNCIO_INCORPORACAO, ]
-  pos <- ret_df[ret_df$data >= ANUNCIO_INCORPORACAO, ]
+  pre_tudo <- ret_df[ret_df$data <  ANUNCIO_INCORPORACAO, ]
+  pos      <- ret_df[ret_df$data >= ANUNCIO_INCORPORACAO, ]
   
-  cor_pre <- cor(pre$bpan4, pre$bpac11)
-  cor_pos <- if (nrow(pos) >= 2) cor(pos$bpan4, pos$bpac11) else NA
+  # Janela pré-evento do MESMO TAMANHO que a pós (não a amostra inteira) —
+  # comparar 7 anos de história contra 2-3 meses pós-anúncio dilui qualquer
+  # mudança de regime recente numa média de longuíssimo prazo. Para testar
+  # se a correlação mudou AO REDOR do evento, as duas janelas precisam ter
+  # tamanho comparável e estar próximas da mesma data.
+  n_pos <- nrow(pos)
+  pre_janela <- tail(pre_tudo, n_pos)
+  
+  cor_pre_tudo   <- cor(pre_tudo$bpan4, pre_tudo$bpac11)
+  cor_pre_janela <- if (nrow(pre_janela) >= 2) cor(pre_janela$bpan4, pre_janela$bpac11) else NA
+  cor_pos        <- if (n_pos >= 2) cor(pos$bpan4, pos$bpac11) else NA
   
   cat("\n  Correlação BPAN4 x BPAC11 (retornos diários):\n")
-  cat("    Antes de", as.character(ANUNCIO_INCORPORACAO), ":", round(cor_pre, 3), "(n =", nrow(pre), ")\n")
-  cat("    A partir de", as.character(ANUNCIO_INCORPORACAO), ":", round(cor_pos, 3), "(n =", nrow(pos), ")\n")
+  cat("    Amostra inteira até", as.character(ANUNCIO_INCORPORACAO), "(contexto, não comparável):",
+      round(cor_pre_tudo, 3), "(n =", nrow(pre_tudo), ")\n")
+  cat("    Janela pré-evento, mesmo tamanho que a pós (", nrow(pre_janela), "dias):",
+      round(cor_pre_janela, 3), "\n")
+  cat("    A partir de", as.character(ANUNCIO_INCORPORACAO), ":", round(cor_pos, 3), "(n =", n_pos, ")\n")
+  
+  # Checagem à parte: a deslistagem efetiva só ocorreu no fim de janeiro de
+  # 2026 — bem depois do DATA_FIM global (31/12/2025). Se a convergência de
+  # preço só se completa perto da execução da troca de ações, a janela
+  # pós-evento usada acima (out-dez/2025) pode estar cedo demais para
+  # capturá-la. Lê as duas abas de novo, sem o corte de DATA_FIM, só para
+  # este diagnóstico — não altera dados_adj nem o painel principal.
+  raw_pan_ext <- read_excel(CAMINHO_EXCEL, sheet = "BPAN4")  %>% mutate(Data = as.Date(Data)) %>% arrange(Data)
+  raw_btg_ext <- read_excel(CAMINHO_EXCEL, sheet = "BPAC11") %>% mutate(Data = as.Date(Data)) %>% arrange(Data)
+  
+  ret_ext <- na.omit(data.frame(
+    data  = raw_pan_ext$Data[-1],
+    bpan4 = diff(log(raw_pan_ext$Fechamento_Aj)),
+    bpac11 = diff(log(raw_btg_ext$Fechamento_Aj[match(raw_pan_ext$Data, raw_btg_ext$Data)]))
+  ))
+  
+  pos_ext <- ret_ext[ret_ext$data >= ANUNCIO_INCORPORACAO, ]
+  cor_pos_ext <- if (nrow(pos_ext) >= 2) cor(pos_ext$bpan4, pos_ext$bpac11) else NA
+  
+  cat("\n    [Diagnóstico, fora do DATA_FIM global] Pós-anúncio até a última data disponível (",
+      as.character(max(pos_ext$data)), "):", round(cor_pos_ext, 3), "(n =", nrow(pos_ext), ")\n")
 }
+
 
 
 # ==============================================================================
@@ -351,6 +387,9 @@ write.csv(data.frame(data = index(painel_imp), as.data.frame(painel_imp)),
 # ==============================================================================
 # SEÇÃO 8 — TESTES DE ESTACIONARIEDADE E MEMÓRIA LONGA (PAINEL PÓS-KALMAN)
 # ==============================================================================
+# Roda sobre painel_imp (contínuo, sem NA por construção — Seção 7), não
+# sobre a série pré-imputação com na.omit(), que emendaria segmentos não
+# contíguos (colaria o dia 50 direto no dia 73 se o meio virasse NA).
 
 cat("\n[8/11] Testes de estacionariedade e memória longa (painel pós-Kalman)...\n")
 
@@ -427,7 +466,7 @@ if (length(falhas_pp) > 0)    warning("Phillips-Perron NÃO rejeitou raiz unitá
 if (length(falhas_za) > 0)    warning("Zivot-Andrews NÃO rejeitou raiz unitária em: ", paste(falhas_za, collapse=", "))
 
 cat("\n  Nota: ADF rejeitando e KPSS não rejeitando simultaneamente (comum aqui)\n",
-    "  não é contradição, é a assinatura de memória longa (0 < d < 1), não de\n",
+    "  não é contradição — é a assinatura de memória longa (0 < d < 1), não de\n",
     "  raiz unitária. Ver coluna GPH_d.\n")
 
 write.csv(resultados_testes, "outputs/tabelas/testes_estacionariedade.csv", row.names = FALSE)
@@ -1047,6 +1086,191 @@ write.csv(resultado_diadica, "outputs/tabelas/regressao_diadica_fullsample.csv",
 write.csv(pares_ij, "outputs/tabelas/painel_diadico.csv", row.names = FALSE)
 cat("  Tabelas salvas.\n")
 
+# ── Indicadoras por par específico (substitui mesmo_controle) ──────────────
+# A dummy agregada mesmo_controle mistura pares fortes (vínculo societário)
+# com pares que só compartilham uma etiqueta nominal. Substitui por uma
+# indicadora por par que compartilha categoria — mesma lógica da Tabela 3
+# (segunda metade), mas ainda em corte único (full sample estático): cada
+# indicador tem só 2 observações (i->j e j->i daquele par) depois dos
+# efeitos fixos, então a precisão aqui é baixa — a versão robusta vem da
+# extensão temporal (cortes mensais), próximo passo.
+par_especifico <- function(a, b, banco1, banco2) {
+  as.integer((a == banco1 & b == banco2) | (a == banco2 & b == banco1))
+}
+pares_ij$par_itub_bbdc <- par_especifico(pares_ij$receptor, pares_ij$emissor, "ITUB4", "BBDC4")
+pares_ij$par_btg_pan   <- par_especifico(pares_ij$receptor, pares_ij$emissor, "BPAC11", "BPAN4")
+pares_ij$par_bb_brsr   <- par_especifico(pares_ij$receptor, pares_ij$emissor, "BBAS3", "BRSR6")
+pares_ij$par_abc_san   <- par_especifico(pares_ij$receptor, pares_ij$emissor, "ABCB4", "SANB11")
+
+lm_diadica_par <- lm(
+  theta_pct ~ factor(emissor) + factor(receptor) +
+    par_itub_bbdc + par_btg_pan + par_bb_brsr + par_abc_san + ambos_grande,
+  data = pares_ij
+)
+
+vcov_cluster_par  <- sandwich::vcovCL(lm_diadica_par, cluster = pares_ij$par_id)
+teste_diadica_par <- lmtest::coeftest(lm_diadica_par, vcov = vcov_cluster_par)
+
+vars_par <- c("par_itub_bbdc", "par_btg_pan", "par_bb_brsr", "par_abc_san", "ambos_grande")
+resultado_diadica_par <- data.frame(
+  Indicadora  = c("Bradesco e Itaú (privados nacionais)", "BTG e Pan (vínculo societário)",
+                  "Banco do Brasil e Banrisul (estatais)", "ABC Brasil e Santander (\"estrangeiros\")",
+                  "Ambos de grande porte"),
+  Coeficiente = round(teste_diadica_par[vars_par, "Estimate"], 3),
+  Erro_padrao = round(teste_diadica_par[vars_par, "Std. Error"], 3),
+  t           = round(teste_diadica_par[vars_par, "t value"], 2),
+  p           = round(teste_diadica_par[vars_par, "Pr(>|t|)"], 4)
+)
+
+cat("\n  Regressão diádica — indicadoras por par específico (corte único, preliminar):\n")
+print(resultado_diadica_par, row.names = FALSE)
+
+write.csv(resultado_diadica_par, "outputs/tabelas/regressao_diadica_par_especifico.csv", row.names = FALSE)
+cat("  Tabela salva em outputs/tabelas/regressao_diadica_par_especifico.csv\n")
+
+
+# ── Regressão diádica: extensão temporal (cortes mensais) ──────────────────
+# Em vez de uma matriz theta única (full sample), o TVP-VAR (Seção 12) já
+# produz uma matriz theta_t por dia. Reestima a regressão diádica por par
+# específico em cada corte mensal e resume a série resultante de
+# coeficientes — a robustez vem de o sinal se repetir corte a corte, não do
+# p-valor de uma estimativa isolada.
+
+cat("\n  Extensão temporal da regressão diádica — extraindo cortes mensais do TVP-VAR...\n")
+
+# Inspecionar antes de indexar — mesmo cuidado da Seção 13 com dca_full$CT.
+cat("  Dimensões de dca_tvp$CT:", paste(dim(dca_tvp$CT), collapse = " x "), "\n")
+
+CT_tvp   <- dca_tvp$CT
+nd_tvp   <- length(dim(CT_tvp))
+datas_tvp <- index(tci_tvp)
+
+stopifnot(
+  "Terceira dimensão de dca_tvp$CT não bate com o número de datas do TCI-TVP" =
+    dim(CT_tvp)[3] == length(datas_tvp)
+)
+
+# Um corte por mês: último dia disponível de cada mês (evita usar dias
+# consecutivos quase idênticos, que não trazem informação nova).
+meses           <- format(datas_tvp, "%Y-%m")
+idx_ultimo_dia  <- !duplicated(meses, fromLast = TRUE)
+idx_corte       <- which(idx_ultimo_dia)
+datas_corte     <- datas_tvp[idx_corte]
+
+cat("  ", length(datas_corte), "cortes mensais, de", as.character(min(datas_corte)),
+    "a", as.character(max(datas_corte)), "\n")
+
+coefs_temporais <- data.frame()
+
+for (k in seq_along(idx_corte)) {
+  t_idx <- idx_corte[k]
+  dt    <- datas_corte[k]
+  
+  if (nd_tvp == 3) {
+    theta_t <- CT_tvp[, , t_idx]
+  } else if (nd_tvp == 4) {
+    theta_t <- CT_tvp[, , t_idx, dim(CT_tvp)[4]]
+  } else {
+    stop("Formato inesperado de dca_tvp$CT (", nd_tvp, " dimensões).")
+  }
+  dimnames(theta_t) <- list(NOMES, NOMES)
+  diag(theta_t) <- 0
+  
+  pares_t <- expand.grid(receptor = NOMES, emissor = NOMES, stringsAsFactors = FALSE)
+  pares_t <- pares_t[pares_t$receptor != pares_t$emissor, ]
+  pares_t$theta_pct      <- mapply(function(i, j) theta_t[i, j] * 100, pares_t$receptor, pares_t$emissor)
+  pares_t$par_itub_bbdc  <- par_especifico(pares_t$receptor, pares_t$emissor, "ITUB4", "BBDC4")
+  pares_t$par_btg_pan    <- par_especifico(pares_t$receptor, pares_t$emissor, "BPAC11", "BPAN4")
+  pares_t$par_bb_brsr    <- par_especifico(pares_t$receptor, pares_t$emissor, "BBAS3", "BRSR6")
+  pares_t$par_abc_san    <- par_especifico(pares_t$receptor, pares_t$emissor, "ABCB4", "SANB11")
+  pares_t$ambos_grande   <- as.integer(porte[pares_t$receptor] == "Grande" & porte[pares_t$emissor] == "Grande")
+  
+  lm_t <- tryCatch(
+    lm(theta_pct ~ factor(emissor) + factor(receptor) +
+         par_itub_bbdc + par_btg_pan + par_bb_brsr + par_abc_san + ambos_grande,
+       data = pares_t),
+    error = function(e) NULL
+  )
+  if (is.null(lm_t)) next
+  
+  cf <- coef(lm_t)
+  coefs_temporais <- rbind(coefs_temporais, data.frame(
+    data         = dt,
+    itub_bbdc    = unname(cf["par_itub_bbdc"]),
+    btg_pan      = unname(cf["par_btg_pan"]),
+    bb_brsr      = unname(cf["par_bb_brsr"]),
+    abc_san      = unname(cf["par_abc_san"]),
+    ambos_grande = unname(cf["ambos_grande"])
+  ))
+}
+
+cat("  ", nrow(coefs_temporais), "cortes estimados com sucesso.\n")
+
+# Resumo: média da série de coeficientes, % de cortes com sinal positivo, e
+# teste t da média contra zero — é essa média testada, não um corte isolado,
+# que sustenta o argumento.
+resumir_serie <- function(x) {
+  x  <- x[!is.na(x)]
+  tt <- t.test(x, mu = 0)
+  data.frame(
+    Media         = round(mean(x), 3),
+    Pct_positivo  = paste0(sum(x > 0), "/", length(x)),
+    t             = round(unname(tt$statistic), 2),
+    p             = round(tt$p.value, 4)
+  )
+}
+
+resumo_temporal <- rbind(
+  cbind(Indicadora = "Bradesco e Itaú (privados nacionais)",    resumir_serie(coefs_temporais$itub_bbdc)),
+  cbind(Indicadora = "BTG e Pan (vínculo societário)",          resumir_serie(coefs_temporais$btg_pan)),
+  cbind(Indicadora = "Banco do Brasil e Banrisul (estatais)",   resumir_serie(coefs_temporais$bb_brsr)),
+  cbind(Indicadora = "ABC Brasil e Santander (\"estrangeiros\")", resumir_serie(coefs_temporais$abc_san)),
+  cbind(Indicadora = "Ambos de grande porte",                   resumir_serie(coefs_temporais$ambos_grande))
+)
+
+cat("\n  Regressão diádica — extensão temporal (", nrow(coefs_temporais), "cortes mensais):\n")
+print(resumo_temporal, row.names = FALSE)
+
+write.csv(coefs_temporais, "outputs/tabelas/regressao_diadica_temporal_serie.csv", row.names = FALSE)
+write.csv(resumo_temporal, "outputs/tabelas/regressao_diadica_temporal_resumo.csv", row.names = FALSE)
+cat("  Tabelas salvas.\n")
+
+# ── Gráfico: coeficientes diádicos ao longo do tempo ────────────────────────
+coefs_long <- coefs_temporais %>%
+  pivot_longer(-data, names_to = "par", values_to = "coeficiente") %>%
+  mutate(par = factor(par,
+                      levels = c("itub_bbdc", "btg_pan", "bb_brsr", "abc_san", "ambos_grande"),
+                      labels = c("Bradesco e Itaú", "BTG e Pan", "BB e Banrisul", "ABC Brasil e Santander", "Ambos grande porte")
+  ))
+
+p_coefs_temporais <- ggplot(coefs_long, aes(x = data, y = coeficiente, color = par)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40", linewidth = 0.4) +
+  geom_line(linewidth = 0.6) +
+  facet_wrap(~par, ncol = 1, scales = "free_y") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  labs(title = "Coeficientes da regressão diádica por corte mensal (TVP-VAR)",
+       subtitle = "Cada painel: coeficiente daquele par/indicadora, um valor por mês, com efeitos fixos de emissor/receptor",
+       x = NULL, y = "Coeficiente (p.p.)") +
+  theme_minimal(base_size = 10) +
+  theme(legend.position = "none", strip.text = element_text(face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "white", color = NA))
+
+ggsave("outputs/graficos/coefs_diadicos_temporais.png", p_coefs_temporais, width = 10, height = 12, dpi = 300, bg = "white")
+cat("  Gráfico salvo em outputs/graficos/coefs_diadicos_temporais.png\n")
+
+# ── Médias anuais do coeficiente BTG-Pan ────────────────────────────────────
+coefs_temporais$ano <- format(coefs_temporais$data, "%Y")
+media_anual_btgpan <- aggregate(btg_pan ~ ano, data = coefs_temporais, FUN = mean)
+media_anual_btgpan$btg_pan <- round(media_anual_btgpan$btg_pan, 2)
+
+cat("\n  Coeficiente BTG-Pan — média por ano:\n")
+print(media_anual_btgpan, row.names = FALSE)
+
+write.csv(media_anual_btgpan, "outputs/tabelas/btgpan_coeficiente_anual.csv", row.names = FALSE)
+cat("  Tabela salva em outputs/tabelas/btgpan_coeficiente_anual.csv\n")
+
 
 # ==============================================================================
 # SEÇÃO 16 — REDES: GRAFO DE VISUALIZAÇÃO (NET COLAPSADO, THRESHOLD RELATIVO)
@@ -1059,7 +1283,10 @@ cat("\n[16] Construindo grafo de visualização (NET colapsado, threshold relati
 npdc <- adj_full - theta_offdiag
 stopifnot("npdc deveria ser antissimétrica" = all(abs(npdc + t(npdc)) < 1e-12))
 
-
+# NETij (diferença) é estruturalmente menor que theta_ij bruto e se dilui
+# entre até 7 contrapartes — um threshold absoluto pensado para o grafo
+# bruto (Opção A) poda quase tudo e isola nós. Por isso usamos corte
+# relativo ao par mais forte observado.
 pares <- combn(NOMES, 2, simplify = FALSE)
 dist_netij <- data.frame(
   par   = sapply(pares, function(p) paste(p, collapse = "-")),
