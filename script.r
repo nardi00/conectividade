@@ -280,24 +280,22 @@ if (all(c("BPAN4", "BPAC11") %in% NOMES)) {
       round(cor(pre_janela$ret_bpan4, pre_janela$ret_bpac11), 3), "\n")
   cat("    Pós-evento, período inteiro (", nrow(pos), "dias):",
       round(cor(pos$ret_bpan4, pos$ret_bpac11), 3), "\n")
+  n_ret <- nrow(ret_df)
+  cat("    Correlação nos últimos N dias da amostra (direto sobre os retornos brutos):\n")
+  for (k in c(10, 20, 30, 40, 50, 60)) {
+    idx <- max(1, n_ret - k + 1):n_ret
+    cor_k <- cor(ret_df$ret_bpan4[idx], ret_df$ret_bpac11[idx], use = "complete.obs")
+    cat("      últimos", k, "dias:", round(cor_k, 4), "\n")
+  }
   
-  # A correlação do "período pós inteiro" mistura o início (negócio ainda
-  # incerto, sem aprovação) com o fim (perto da execução da troca) — dilui
-  # a convergência que só se completa perto da deslistagem. Correlação
-  # móvel, olhada nos últimos dias da amostra, mostra isso claramente.
+  # Série de correlação móvel (30 dias) — só para o gráfico, não para os
+  # números acima.
   JANELA_ROLL <- 30
   ret_df$corr_roll <- zoo::rollapply(
     ret_df[, c("ret_bpan4", "ret_bpac11")], width = JANELA_ROLL,
     FUN = function(x) cor(x[, 1], x[, 2], use = "complete.obs"),
     by.column = FALSE, align = "right", fill = NA
   )
-  
-  cat("    Correlação móvel (", JANELA_ROLL, "dias), nos últimos dias da amostra:\n")
-  n_ret <- nrow(ret_df)
-  for (k in c(10, 30, 60)) {
-    idx <- max(1, n_ret - k + 1):n_ret
-    cat("      últimos", k, "dias da amostra:", round(mean(ret_df$corr_roll[idx], na.rm = TRUE), 4), "\n")
-  }
   
   p_corr_roll <- ret_df %>%
     filter(Data >= as.Date("2025-08-01")) %>%
