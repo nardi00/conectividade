@@ -28,17 +28,41 @@ library(sandwich)
 library(lmtest)
 library(patchwork)
 
-dir.create("outputs/tabelas",  recursive = TRUE, showWarnings = FALSE)
-dir.create("outputs/graficos", recursive = TRUE, showWarnings = FALSE)
+# ── Configuração do painel ───────────────────────────────────────────────
+# Alterna entre os dois painéis
+# Trocar PAINEL e rodar o script de novo — cada painel grava em sua própria
+# subpasta (outputs/N7_principal/, outputs/N8_extensao/), nunca se sobrepõem.
+PAINEL <- "N8_extensao"   # N7_principal ou N8_extensao
 
-# ── Constantes globais ────────────────────────────────────────────────────
+CONFIG_PAINEIS <- list(
+  N7_principal = list(
+    nomes       = c("ITUB4", "BBDC4", "BBAS3", "SANB11", "BPAC11", "BRSR6", "ABCB4"),
+    data_inicio = "2017-10-01",
+    data_fim    = "2026-05-29"
+  ),
+  N8_extensao = list(
+    nomes       = c("ITUB4", "BBDC4", "BBAS3", "SANB11", "BPAC11", "BRSR6", "ABCB4", "BPAN4"),
+    data_inicio = "2019-01-01",
+    data_fim    = "2025-10-13"
+  )
+)
+
+stopifnot("PAINEL precisa ser 'N7_principal' ou 'N8_extensao'" = PAINEL %in% names(CONFIG_PAINEIS))
+cfg <- CONFIG_PAINEIS[[PAINEL]]
+
 CAMINHO_EXCEL <- "Cotacoes_ComDinheiro_8bancos_2014-2026.xlsx"
+NOMES         <- cfg$nomes
+DATA_INICIO   <- cfg$data_inicio
+DATA_FIM      <- cfg$data_fim
 
-NOMES <- c("ITUB4", "BBDC4", "BBAS3", "SANB11",
-           "BPAC11", "BRSR6", "ABCB4", "BPAN4")
+OUTPUT_DIR <- file.path("outputs", PAINEL)
+outfile    <- function(subpath) file.path(OUTPUT_DIR, subpath)
 
-DATA_INICIO <- "2019-01-01"
-DATA_FIM    <- "2025-12-31"
+cat("\n=== Painel:", PAINEL, "| N =", length(NOMES), "bancos | período:",
+    DATA_INICIO, "a", DATA_FIM, "| saída em", OUTPUT_DIR, "===\n")
+
+dir.create(outfile("tabelas"),  recursive = TRUE, showWarnings = FALSE)
+dir.create(outfile("graficos"), recursive = TRUE, showWarnings = FALSE)
 
 N_JANELA_W    <- 200
 H_HORIZONTE   <- 10
@@ -194,9 +218,9 @@ for (nome in NOMES) {
 if (nrow(relatorio_outliers) > 0) {
   cat("\n  Outliers identificados (|z| > 5):\n")
   print(relatorio_outliers[order(relatorio_outliers$data), ])
-  write.csv(relatorio_outliers, "outputs/tabelas/outliers_para_revisao.csv", row.names = FALSE)
+  write.csv(relatorio_outliers, outfile("tabelas/outliers_para_revisao.csv"), row.names = FALSE)
   
-  # Regra da Seção 6.1.3, item 4: >=2 bancos na mesma data = evento sistêmico
+  # Regra: >=2 bancos na mesma data = evento sistêmico
   # (mantém); 1 banco só = precisa de verificação externa. Apenas relatório —
   # não altera dados_adj.
   n_por_data <- table(relatorio_outliers$data)
@@ -215,67 +239,82 @@ if (nrow(relatorio_outliers) > 0) {
   cat("   ", nrow(isolados), "linha(s) ISOLADAS — precisam de verificação externa:\n")
   print(isolados[, c("banco", "data", "retorno", "z_score")], row.names = FALSE)
   
-  write.csv(relatorio_outliers, "outputs/tabelas/outliers_classificados.csv", row.names = FALSE)
-  cat("\n  Tabela classificada salva em outputs/tabelas/outliers_classificados.csv\n")
+  write.csv(relatorio_outliers, outfile("tabelas/outliers_classificados.csv"), row.names = FALSE)
+  cat("\n  Tabela classificada salva em", outfile("tabelas/outliers_classificados.csv"), "\n")
 } else {
   cat("  Nenhum outlier com |z| > 5 encontrado.\n")
 }
 
-# ── Correlação BPAN4 x BPAC11 — pré/pós anúncio de incorporação ────────────
+# ── Correlação BPAN4 x BPAC11 — diagnóstico do anúncio de incorporação ──────
 if (all(c("BPAN4", "BPAC11") %in% NOMES)) {
   ANUNCIO_INCORPORACAO <- as.Date("2025-10-14")
   
-  ret_bpan4  <- diff(log(as.numeric(dados_adj[["BPAN4"]]$Close)))
-  ret_bpac11 <- diff(log(as.numeric(dados_adj[["BPAC11"]]$Close)))
-  ret_df <- na.omit(data.frame(
-    data = index(dados_adj[["BPAN4"]])[-1], bpan4 = ret_bpan4, bpac11 = ret_bpac11
-  ))
+  # Lê direto do Excel, sem o corte de DATA_FIM: no painel N=8 extensão,
+  # DATA_FIM já para um dia antes do anúncio (Seção 1, por desenho, para
+  # não contaminar a estimação do VAR) — este diagnóstico precisa enxergar
+  # além disso, até perto da deslistagem efetiva (jan/2026).
+  raw_pan <- read_excel(CAMINHO_EXCEL, sheet = "BPAN4")  %>%
+    mutate(Data = as.Date(Data)) %>% select(Data, BPAN4 = Fechamento_Aj) %>% arrange(Data)
+  raw_btg <- read_excel(CAMINHO_EXCEL, sheet = "BPAC11") %>%
+    mutate(Data = as.Date(Data)) %>% select(Data, BPAC11 = Fechamento_Aj) %>% arrange(Data)
   
-  pre_tudo <- ret_df[ret_df$data <  ANUNCIO_INCORPORACAO, ]
-  pos      <- ret_df[ret_df$data >= ANUNCIO_INCORPORACAO, ]
+  precos <- raw_pan %>%
+    inner_join(raw_btg, by = "Data") %>%
+    filter(!is.na(BPAN4), !is.na(BPAC11), BPAN4 > 0, BPAC11 > 0) %>%
+    arrange(Data)
+  
+  ret_df <- precos %>%
+    mutate(ret_bpan4 = log(BPAN4 / lag(BPAN4)), ret_bpac11 = log(BPAC11 / lag(BPAC11))) %>%
+    tidyr::drop_na(ret_bpan4, ret_bpac11)
+  
+  pre_tudo <- ret_df %>% filter(Data < ANUNCIO_INCORPORACAO)
+  pos      <- ret_df %>% filter(Data >= ANUNCIO_INCORPORACAO)
   
   # Janela pré-evento do MESMO TAMANHO que a pós (não a amostra inteira) —
-  # comparar 7 anos de história contra 2-3 meses pós-anúncio dilui qualquer
-  # mudança de regime recente numa média de longuíssimo prazo. Para testar
-  # se a correlação mudou AO REDOR do evento, as duas janelas precisam ter
-  # tamanho comparável e estar próximas da mesma data.
-  n_pos <- nrow(pos)
-  pre_janela <- tail(pre_tudo, n_pos)
-  
-  cor_pre_tudo   <- cor(pre_tudo$bpan4, pre_tudo$bpac11)
-  cor_pre_janela <- if (nrow(pre_janela) >= 2) cor(pre_janela$bpan4, pre_janela$bpac11) else NA
-  cor_pos        <- if (n_pos >= 2) cor(pos$bpan4, pos$bpac11) else NA
+  # comparar anos de história contra meses pós-anúncio dilui qualquer
+  # mudança de regime recente numa média de longuíssimo prazo.
+  pre_janela <- tail(pre_tudo, nrow(pos))
   
   cat("\n  Correlação BPAN4 x BPAC11 (retornos diários):\n")
-  cat("    Amostra inteira até", as.character(ANUNCIO_INCORPORACAO), "(contexto, não comparável):",
-      round(cor_pre_tudo, 3), "(n =", nrow(pre_tudo), ")\n")
   cat("    Janela pré-evento, mesmo tamanho que a pós (", nrow(pre_janela), "dias):",
-      round(cor_pre_janela, 3), "\n")
-  cat("    A partir de", as.character(ANUNCIO_INCORPORACAO), ":", round(cor_pos, 3), "(n =", n_pos, ")\n")
+      round(cor(pre_janela$ret_bpan4, pre_janela$ret_bpac11), 3), "\n")
+  cat("    Pós-evento, período inteiro (", nrow(pos), "dias):",
+      round(cor(pos$ret_bpan4, pos$ret_bpac11), 3), "\n")
   
-  # Checagem à parte: a deslistagem efetiva só ocorreu no fim de janeiro de
-  # 2026 — bem depois do DATA_FIM global (31/12/2025). Se a convergência de
-  # preço só se completa perto da execução da troca de ações, a janela
-  # pós-evento usada acima (out-dez/2025) pode estar cedo demais para
-  # capturá-la. Lê as duas abas de novo, sem o corte de DATA_FIM, só para
-  # este diagnóstico — não altera dados_adj nem o painel principal.
-  raw_pan_ext <- read_excel(CAMINHO_EXCEL, sheet = "BPAN4")  %>% mutate(Data = as.Date(Data)) %>% arrange(Data)
-  raw_btg_ext <- read_excel(CAMINHO_EXCEL, sheet = "BPAC11") %>% mutate(Data = as.Date(Data)) %>% arrange(Data)
+  # A correlação do "período pós inteiro" mistura o início (negócio ainda
+  # incerto, sem aprovação) com o fim (perto da execução da troca) — dilui
+  # a convergência que só se completa perto da deslistagem. Correlação
+  # móvel, olhada nos últimos dias da amostra, mostra isso claramente.
+  JANELA_ROLL <- 30
+  ret_df$corr_roll <- zoo::rollapply(
+    ret_df[, c("ret_bpan4", "ret_bpac11")], width = JANELA_ROLL,
+    FUN = function(x) cor(x[, 1], x[, 2], use = "complete.obs"),
+    by.column = FALSE, align = "right", fill = NA
+  )
   
-  ret_ext <- na.omit(data.frame(
-    data  = raw_pan_ext$Data[-1],
-    bpan4 = diff(log(raw_pan_ext$Fechamento_Aj)),
-    bpac11 = diff(log(raw_btg_ext$Fechamento_Aj[match(raw_pan_ext$Data, raw_btg_ext$Data)]))
-  ))
+  cat("    Correlação móvel (", JANELA_ROLL, "dias), nos últimos dias da amostra:\n")
+  n_ret <- nrow(ret_df)
+  for (k in c(10, 30, 60)) {
+    idx <- max(1, n_ret - k + 1):n_ret
+    cat("      últimos", k, "dias da amostra:", round(mean(ret_df$corr_roll[idx], na.rm = TRUE), 4), "\n")
+  }
   
-  pos_ext <- ret_ext[ret_ext$data >= ANUNCIO_INCORPORACAO, ]
-  cor_pos_ext <- if (nrow(pos_ext) >= 2) cor(pos_ext$bpan4, pos_ext$bpac11) else NA
+  p_corr_roll <- ret_df %>%
+    filter(Data >= as.Date("2025-08-01")) %>%
+    ggplot(aes(x = Data, y = corr_roll)) +
+    geom_line(linewidth = 0.7, color = "#b2182b") +
+    geom_vline(xintercept = as.numeric(ANUNCIO_INCORPORACAO), linetype = "dashed", color = "grey40") +
+    geom_hline(yintercept = 0, linetype = "dotted", color = "grey60") +
+    coord_cartesian(ylim = c(-1, 1)) +
+    labs(title = "Correlação móvel de retornos — BPAN4 x BPAC11",
+         subtitle = paste0("Janela de ", JANELA_ROLL, " dias | Linha tracejada: anúncio de incorporação (14/10/2025)"),
+         x = NULL, y = "Correlação") +
+    theme_minimal(base_size = 11) +
+    theme(plot.background = element_rect(fill = "white", color = NA))
   
-  cat("\n    [Diagnóstico, fora do DATA_FIM global] Pós-anúncio até a última data disponível (",
-      as.character(max(pos_ext$data)), "):", round(cor_pos_ext, 3), "(n =", nrow(pos_ext), ")\n")
+  ggsave(outfile("graficos/corr_bpan4_bpac11_rolling.png"), p_corr_roll, width = 10, height = 5, dpi = 300, bg = "white")
+  cat("    Gráfico salvo em", outfile("graficos/corr_bpan4_bpac11_rolling.png"), "\n")
 }
-
-
 
 # ==============================================================================
 # SEÇÃO 5 — ESTIMAÇÃO DA VOLATILIDADE: ROGERS-SATCHELL + OVERNIGHT
@@ -299,7 +338,7 @@ rogers_satchell_overnight <- function(ohlc_mat) {
   rs         <- log(H / C) * log(H / O) + log(L / C) * log(L / O)   # Rogers-Satchell
   
   sig2 <- overnight2 + rs
-  sig2[!is.na(sig2) & sig2 < 0] <- NA          # RS pode sair negativo por ruído de
+  sig2[!is.na(sig2) & sig2 < 0] <- NA          # RS pode sair negativo por ruído de 
   # microestrutura em dias de range muito
   # estreito — tratado como NA, não como zero
   sqrt(sig2)                                    # desvio-padrão diário, não anualizado
@@ -382,15 +421,13 @@ stopifnot("Ainda há NAs no painel após imputação!" = sum(is.na(painel_imp)) 
 cat("  OK — painel final:", nrow(painel_imp), "observações ×", ncol(painel_imp), "bancos. Zero NAs.\n")
 
 write.csv(data.frame(data = index(painel_imp), as.data.frame(painel_imp)),
-          "outputs/tabelas/painel_logvol.csv", row.names = FALSE)
+          outfile("tabelas/painel_logvol.csv"), row.names = FALSE)
 
 
 # ==============================================================================
 # SEÇÃO 8 — TESTES DE ESTACIONARIEDADE E MEMÓRIA LONGA (PAINEL PÓS-KALMAN)
 # ==============================================================================
-# Roda sobre painel_imp (contínuo, sem NA por construção — Seção 7), não
-# sobre a série pré-imputação com na.omit(), que emendaria segmentos não
-# contíguos (colaria o dia 50 direto no dia 73 se o meio virasse NA).
+# Roda sobre painel_imp, não sobre a série pré-imputação com na.omit().
 
 cat("\n[8/11] Testes de estacionariedade e memória longa (painel pós-Kalman)...\n")
 
@@ -470,8 +507,8 @@ cat("\n  Nota: ADF rejeitando e KPSS não rejeitando simultaneamente (comum aqui
     "  não é contradição — é a assinatura de memória longa (0 < d < 1), não de\n",
     "  raiz unitária. Ver coluna GPH_d.\n")
 
-write.csv(resultados_testes, "outputs/tabelas/testes_estacionariedade.csv", row.names = FALSE)
-cat("  Tabela salva em outputs/tabelas/testes_estacionariedade.csv\n")
+write.csv(resultados_testes, outfile("tabelas/testes_estacionariedade.csv"), row.names = FALSE)
+cat("  Tabela salva em", outfile("tabelas/testes_estacionariedade.csv"), "\n")
 
 
 # ==============================================================================
@@ -492,8 +529,8 @@ desc_df <- as.data.frame(t(round(desc, 4)))
 cat("\n  Estatísticas descritivas (log-volatilidade):\n")
 print(desc_df)
 
-write.csv(desc_df, "outputs/tabelas/estatisticas_descritivas.csv")
-cat("  Salvo em outputs/tabelas/estatisticas_descritivas.csv\n")
+write.csv(desc_df, outfile("tabelas/estatisticas_descritivas.csv"))
+cat("  Salvo em", outfile("tabelas/estatisticas_descritivas.csv"), "\n")
 
 
 # ==============================================================================
@@ -515,7 +552,7 @@ bic_tabela <- data.frame(
 )
 cat("\n  BIC por número de defasagens:\n")
 print(bic_tabela)
-write.csv(bic_tabela, "outputs/tabelas/var_selecao_lags.csv", row.names = FALSE)
+write.csv(bic_tabela, outfile("tabelas/var_selecao_lags.csv"), row.names = FALSE)
 cat("  BIC selecionado:", var_select$selection["SC(n)"], "defasagens\n")
 cat("  Especificação adotada: p =", P_LAGS, "(justificada na metodologia)\n")
 
@@ -556,8 +593,8 @@ rownames(tabela_dy) <- NULL
 cat("\n  Tabela DY (full sample):\n")
 print(tabela_dy)
 
-write.csv(tabela_dy, "outputs/tabelas/dy_fullsample.csv", row.names = FALSE)
-write.csv(tabela_gfevd, "outputs/tabelas/gfevd_fullsample.csv")
+write.csv(tabela_dy, outfile("tabelas/dy_fullsample.csv"), row.names = FALSE)
+write.csv(tabela_gfevd, outfile("tabelas/gfevd_fullsample.csv"))
 cat("  Tabelas salvas.\n")
 
 
@@ -591,9 +628,9 @@ cat("OK —", length(datas_roll), "janelas | de:", as.character(datas_roll[1]),
     "até:", as.character(datas_roll[length(datas_roll)]), "\n")
 
 write.csv(data.frame(data = datas_roll, TCI = as.numeric(tci_rolling)),
-          "outputs/tabelas/tci_rolling.csv", row.names = FALSE)
+          outfile("tabelas/tci_rolling.csv"), row.names = FALSE)
 write.csv(data.frame(data = datas_roll, as.data.frame(net_rolling)),
-          "outputs/tabelas/net_rolling.csv", row.names = FALSE)
+          outfile("tabelas/net_rolling.csv"), row.names = FALSE)
 
 tci_df <- data.frame(data = datas_roll, TCI = as.numeric(tci_rolling))
 
@@ -613,7 +650,7 @@ p_tci <- ggplot(tci_df, aes(x = data, y = TCI)) +
         axis.text.x = element_text(angle = 45, hjust = 1),
         panel.grid.minor = element_blank())
 
-ggsave("outputs/graficos/tci_rolling.png", p_tci, width = 12, height = 5, dpi = 300)
+ggsave(outfile("graficos/tci_rolling.png"), p_tci, width = 12, height = 5, dpi = 300)
 cat("  Gráfico TCI salvo.\n")
 
 net_df <- data.frame(data = datas_roll, as.data.frame(net_rolling)) |>
@@ -639,7 +676,7 @@ p_net <- ggplot(net_df, aes(x = data, y = NET, color = Banco)) +
         axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
         panel.grid.minor = element_blank())
 
-ggsave("outputs/graficos/net_rolling.png", p_net, width = 14, height = 8, dpi = 300)
+ggsave(outfile("graficos/net_rolling.png"), p_net, width = 14, height = 8, dpi = 300)
 cat("  Gráfico NET salvo.\n")
 
 # ── Figura comparativa: TCI para W = 150, 200, 250 sobrepostos ─────────────
@@ -669,7 +706,7 @@ tci_comparacao <- rbind(
 )
 tci_comparacao$W <- factor(tci_comparacao$W, levels = c("W = 150", "W = 200", "W = 250"))
 
-write.csv(tci_comparacao, "outputs/tabelas/tci_comparacao_janelas.csv", row.names = FALSE)
+write.csv(tci_comparacao, outfile("tabelas/tci_comparacao_janelas.csv"), row.names = FALSE)
 
 # Data em que o colapso deixa cada janela: observação do colapso (fim do
 # período, 23/03/2020) + W pregões. Índice na série diária do painel, não
@@ -693,9 +730,6 @@ print(eventos_saida[, c("W", "data")], row.names = FALSE)
 
 cores_janela <- c("W = 150" = "#2166ac", "W = 200" = "#b2182b", "W = 250" = "#1a9850")
 
-# As três datas de saída ficam próximas (só ~50 pregões entre elas) — se os
-# rótulos ficarem todos na mesma altura, colidem entre si e com a curva.
-# Escalona a altura em três níveis (um por janela) para não sobrepor.
 teto <- max(tci_comparacao$TCI, na.rm = TRUE)
 eventos_saida$y_label <- teto * c(0.99, 0.90, 0.81)[match(eventos_saida$W, levels(eventos_saida$W))]
 
@@ -726,7 +760,7 @@ p_comparacao <- ggplot(tci_comparacao, aes(x = data, y = TCI, color = W)) +
     plot.margin = margin(t = 12, r = 16, b = 10, l = 10)
   )
 
-ggsave("outputs/graficos/tci_comparacao_janelas.png", p_comparacao, width = 12, height = 7, dpi = 300, bg = "white")
+ggsave(outfile("graficos/tci_comparacao_janelas.png"), p_comparacao, width = 12, height = 7, dpi = 300, bg = "white")
 cat("  Gráfico comparativo (W = 150/200/250) salvo.\n")
 
 
@@ -743,7 +777,7 @@ cat("  Gráfico comparativo (W = 150/200/250) salvo.\n")
 #
 # O pacote ConnectednessApproach estima o TVP-VAR final dado (kappa1,
 # kappa2) — isso é só um argumento de função. O que NÃO existe pronto é a
-# SELEÇÃO de kappa1/kappa2: implementamos abaixo o filtro de Kalman com
+# SELEÇÃO de kappa1/kappa2: implementada abaixo o filtro de Kalman com
 # fatores de esquecimento (Eq. 1-6) para rodar a grade e escolher o par por
 # verossimilhança preditiva fora da amostra.
 #
@@ -841,7 +875,7 @@ grade_tabela <- grade[order(-grade$peso_post), ]
 cat("\n  Grade completa (ordenada por peso posterior):\n")
 print(grade_tabela, row.names = FALSE)
 
-write.csv(grade_tabela, "outputs/tabelas/tvpvar_grade_kappa.csv", row.names = FALSE)
+write.csv(grade_tabela, outfile("tabelas/tvpvar_grade_kappa.csv"), row.names = FALSE)
 
 # kappa1 = 1 (coeficientes constantes) é caso de fronteira que nosso filtro
 # de Kalman lida bem na busca em grade, mas o ConnectednessApproach exige
@@ -873,9 +907,9 @@ colnames(net_tvp) <- NOMES
 cat("  OK —", length(tci_tvp), "observações de TCI dinâmico (TVP-VAR).\n")
 
 write.csv(data.frame(data = index(tci_tvp), TCI = as.numeric(tci_tvp)),
-          "outputs/tabelas/tci_tvpvar.csv", row.names = FALSE)
+          outfile("tabelas/tci_tvpvar.csv"), row.names = FALSE)
 write.csv(data.frame(data = index(net_tvp), as.data.frame(net_tvp)),
-          "outputs/tabelas/net_tvpvar.csv", row.names = FALSE)
+          outfile("tabelas/net_tvpvar.csv"), row.names = FALSE)
 
 p_tci_tvp <- ggplot(data.frame(data = index(tci_tvp), TCI = as.numeric(tci_tvp)),
                     aes(x = data, y = TCI)) +
@@ -895,7 +929,7 @@ p_tci_tvp <- ggplot(data.frame(data = index(tci_tvp), TCI = as.numeric(tci_tvp))
         axis.text.x = element_text(angle = 45, hjust = 1),
         panel.grid.minor = element_blank())
 
-ggsave("outputs/graficos/tci_tvpvar.png", p_tci_tvp, width = 12, height = 5, dpi = 300)
+ggsave(outfile("graficos/tci_tvpvar.png"), p_tci_tvp, width = 12, height = 5, dpi = 300)
 cat("  Gráfico TCI (TVP-VAR) salvo.\n")
 
 
@@ -905,8 +939,6 @@ cat("  Gráfico TCI (TVP-VAR) salvo.\n")
 
 cat("\n[13] Construindo matriz de adjacência (grafo completo, sem threshold)...\n")
 
-# dca_full$CT ("Connectedness Table"), não $TABLE. Formato 3D/4D não
-# documentado para connectedness="Time" — inspecionar antes de indexar.
 cat("  Nomes disponíveis em dca_full:\n")
 print(names(dca_full))
 cat("\n  Dimensões de dca_full$CT:", paste(dim(dca_full$CT), collapse = " x "), "\n")
@@ -946,9 +978,8 @@ cat("    Manual:", round(tci_manual, 4), "%  |  Pacote:", round(dca_full$TCI, 4)
 if (abs(tci_manual - as.numeric(dca_full$TCI)) > 0.05) {
   warning("TCI manual e do pacote NÃO batem — revise a indexação de dca_full$CT.")
 } else {
-  cat("    OK — bateu.\n")
+  cat("OK.\n")
 }
-
 
 # ==============================================================================
 # SEÇÃO 14 — REDES: ORIENTAÇÃO DAS ARESTAS E OBJETO IGRAPH (FULL SAMPLE)
@@ -999,10 +1030,6 @@ V(g_full)$name <- NOMES
 
 cat("\n[15] Calculando métricas de centralidade (grafo completo)...\n")
 
-# Betweenness não incluída: não é interpretável em grafo completo — com
-# as 56 arestas dirigidas todas presentes, os valores saem como ruído de
-# baixa magnitude, sem leitura econômica. Métricas baseadas em força/peso.
-
 # eigen_centrality(directed=TRUE) já é a versão "in" por construção (nó
 # importante se é apontado por nós importantes) — sem ajuste manual. Ou
 # seja: mede o quanto o banco RECEBE de bancos importantes, não transmite.
@@ -1022,8 +1049,8 @@ rownames(metricas_centralidade) <- NULL
 cat("\n  Métricas de centralidade (full sample, ordenado por PageRank):\n")
 print(metricas_centralidade)
 
-write.csv(metricas_centralidade, "outputs/tabelas/centralidade_fullsample.csv", row.names = FALSE)
-cat("  Salvo em outputs/tabelas/centralidade_fullsample.csv\n")
+write.csv(metricas_centralidade, outfile("tabelas/centralidade_fullsample.csv"), row.names = FALSE)
+cat("  Salvo em", outfile("tabelas/centralidade_fullsample.csv"), "\n")
 
 # Consolida TO/FROM/NET (Seção 10) com as métricas de centralidade numa
 # tabela só.
@@ -1034,8 +1061,8 @@ rownames(tabela_dy_rede) <- NULL
 cat("\n  Tabela consolidada (DY + centralidade):\n")
 print(tabela_dy_rede)
 
-write.csv(tabela_dy_rede, "outputs/tabelas/dy_centralidade_fullsample.csv", row.names = FALSE)
-cat("  Salvo em outputs/tabelas/dy_centralidade_fullsample.csv\n")
+write.csv(tabela_dy_rede, outfile("tabelas/dy_centralidade_fullsample.csv"), row.names = FALSE)
+cat("  Salvo em", outfile("tabelas/dy_centralidade_fullsample.csv"), "\n")
 
 # ── Confronto com a segmentação prudencial do BCB ───────────────────────────
 # O BCB não publica uma lista numerada de D-SIBs (diferente de jurisdições
@@ -1061,8 +1088,8 @@ rownames(comparacao_dsib) <- NULL
 cat("\n  Confronto: ranking de rede (PageRank) vs. segmentação prudencial do BCB (S1-S5):\n")
 print(comparacao_dsib)
 
-write.csv(comparacao_dsib, "outputs/tabelas/comparacao_dsib.csv", row.names = FALSE)
-cat("  Tabela salva em outputs/tabelas/comparacao_dsib.csv\n")
+write.csv(comparacao_dsib, outfile("tabelas/comparacao_dsib.csv"), row.names = FALSE)
+cat("  Tabela salva em", outfile("tabelas/comparacao_dsib.csv"), "\n")
 
 # Classificação manual (Seção 6.1.1) — usada aqui e no preenchimento dos
 # nós da Seção 16.
@@ -1119,8 +1146,8 @@ resultado_diadica <- data.frame(
 cat("\n  Regressão diádica — coeficientes de interesse (p.p. de variância explicada):\n")
 print(resultado_diadica, row.names = FALSE)
 
-write.csv(resultado_diadica, "outputs/tabelas/regressao_diadica_fullsample.csv", row.names = FALSE)
-write.csv(pares_ij, "outputs/tabelas/painel_diadico.csv", row.names = FALSE)
+write.csv(resultado_diadica, outfile("tabelas/regressao_diadica_fullsample.csv"), row.names = FALSE)
+write.csv(pares_ij, outfile("tabelas/painel_diadico.csv"), row.names = FALSE)
 cat("  Tabelas salvas.\n")
 
 # ── Indicadoras por par específico (substitui mesmo_controle) ──────────────
@@ -1134,36 +1161,53 @@ cat("  Tabelas salvas.\n")
 par_especifico <- function(a, b, banco1, banco2) {
   as.integer((a == banco1 & b == banco2) | (a == banco2 & b == banco1))
 }
-pares_ij$par_itub_bbdc <- par_especifico(pares_ij$receptor, pares_ij$emissor, "ITUB4", "BBDC4")
-pares_ij$par_btg_pan   <- par_especifico(pares_ij$receptor, pares_ij$emissor, "BPAC11", "BPAN4")
-pares_ij$par_bb_brsr   <- par_especifico(pares_ij$receptor, pares_ij$emissor, "BBAS3", "BRSR6")
-pares_ij$par_abc_san   <- par_especifico(pares_ij$receptor, pares_ij$emissor, "ABCB4", "SANB11")
 
-lm_diadica_par <- lm(
-  theta_pct ~ factor(emissor) + factor(receptor) +
-    par_itub_bbdc + par_btg_pan + par_bb_brsr + par_abc_san + ambos_grande,
-  data = pares_ij
+# Só entra na regressão o par cujos dois bancos existem no painel ativo —
+# par_btg_pan, por exemplo, não existe no painel N=7 (sem BPAN4).
+PARES_ESPECIFICOS <- list(
+  par_itub_bbdc = list(bancos = c("ITUB4", "BBDC4"),  label = "Bradesco e Itaú (privados nacionais)"),
+  par_btg_pan   = list(bancos = c("BPAC11", "BPAN4"), label = "BTG e Pan (vínculo societário)"),
+  par_bb_brsr   = list(bancos = c("BBAS3", "BRSR6"),  label = "Banco do Brasil e Banrisul (estatais)"),
+  par_abc_san   = list(bancos = c("ABCB4", "SANB11"), label = "ABC Brasil e Santander (\"estrangeiros\")")
 )
+pares_disponiveis <- Filter(function(p) all(p$bancos %in% NOMES), PARES_ESPECIFICOS)
+
+if (length(pares_disponiveis) < length(PARES_ESPECIFICOS)) {
+  faltando <- setdiff(names(PARES_ESPECIFICOS), names(pares_disponiveis))
+  cat("  Pares fora do painel atual (banco ausente em NOMES):", paste(faltando, collapse = ", "), "\n")
+}
+
+for (var_nome in names(pares_disponiveis)) {
+  bancos <- pares_disponiveis[[var_nome]]$bancos
+  pares_ij[[var_nome]] <- par_especifico(pares_ij$receptor, pares_ij$emissor, bancos[1], bancos[2])
+}
+
+vars_par    <- names(pares_disponiveis)
+formula_par <- as.formula(paste(
+  "theta_pct ~ factor(emissor) + factor(receptor) +",
+  paste(vars_par, collapse = " + "), "+ ambos_grande"
+))
+lm_diadica_par <- lm(formula_par, data = pares_ij)
 
 vcov_cluster_par  <- sandwich::vcovCL(lm_diadica_par, cluster = pares_ij$par_id)
 teste_diadica_par <- lmtest::coeftest(lm_diadica_par, vcov = vcov_cluster_par)
 
-vars_par <- c("par_itub_bbdc", "par_btg_pan", "par_bb_brsr", "par_abc_san", "ambos_grande")
+vars_todos   <- c(vars_par, "ambos_grande")
+labels_todos <- c(sapply(pares_disponiveis, function(p) p$label), "Ambos de grande porte")
+
 resultado_diadica_par <- data.frame(
-  Indicadora  = c("Bradesco e Itaú (privados nacionais)", "BTG e Pan (vínculo societário)",
-                  "Banco do Brasil e Banrisul (estatais)", "ABC Brasil e Santander (\"estrangeiros\")",
-                  "Ambos de grande porte"),
-  Coeficiente = round(teste_diadica_par[vars_par, "Estimate"], 3),
-  Erro_padrao = round(teste_diadica_par[vars_par, "Std. Error"], 3),
-  t           = round(teste_diadica_par[vars_par, "t value"], 2),
-  p           = round(teste_diadica_par[vars_par, "Pr(>|t|)"], 4)
+  Indicadora  = labels_todos,
+  Coeficiente = round(teste_diadica_par[vars_todos, "Estimate"], 3),
+  Erro_padrao = round(teste_diadica_par[vars_todos, "Std. Error"], 3),
+  t           = round(teste_diadica_par[vars_todos, "t value"], 2),
+  p           = round(teste_diadica_par[vars_todos, "Pr(>|t|)"], 4)
 )
 
 cat("\n  Regressão diádica — indicadoras por par específico (corte único, preliminar):\n")
 print(resultado_diadica_par, row.names = FALSE)
 
-write.csv(resultado_diadica_par, "outputs/tabelas/regressao_diadica_par_especifico.csv", row.names = FALSE)
-cat("  Tabela salva em outputs/tabelas/regressao_diadica_par_especifico.csv\n")
+write.csv(resultado_diadica_par, outfile("tabelas/regressao_diadica_par_especifico.csv"), row.names = FALSE)
+cat("  Tabela salva em", outfile("tabelas/regressao_diadica_par_especifico.csv"), "\n")
 
 
 # ── Regressão diádica: extensão temporal (cortes mensais) ──────────────────
@@ -1198,6 +1242,10 @@ cat("  ", length(datas_corte), "cortes mensais, de", as.character(min(datas_cort
     "a", as.character(max(datas_corte)), "\n")
 
 coefs_temporais <- data.frame()
+formula_par_t <- as.formula(paste(
+  "theta_pct ~ factor(emissor) + factor(receptor) +",
+  paste(vars_par, collapse = " + "), "+ ambos_grande"
+))
 
 for (k in seq_along(idx_corte)) {
   t_idx <- idx_corte[k]
@@ -1215,30 +1263,21 @@ for (k in seq_along(idx_corte)) {
   
   pares_t <- expand.grid(receptor = NOMES, emissor = NOMES, stringsAsFactors = FALSE)
   pares_t <- pares_t[pares_t$receptor != pares_t$emissor, ]
-  pares_t$theta_pct      <- mapply(function(i, j) theta_t[i, j] * 100, pares_t$receptor, pares_t$emissor)
-  pares_t$par_itub_bbdc  <- par_especifico(pares_t$receptor, pares_t$emissor, "ITUB4", "BBDC4")
-  pares_t$par_btg_pan    <- par_especifico(pares_t$receptor, pares_t$emissor, "BPAC11", "BPAN4")
-  pares_t$par_bb_brsr    <- par_especifico(pares_t$receptor, pares_t$emissor, "BBAS3", "BRSR6")
-  pares_t$par_abc_san    <- par_especifico(pares_t$receptor, pares_t$emissor, "ABCB4", "SANB11")
-  pares_t$ambos_grande   <- as.integer(porte[pares_t$receptor] == "Grande" & porte[pares_t$emissor] == "Grande")
+  pares_t$theta_pct    <- mapply(function(i, j) theta_t[i, j] * 100, pares_t$receptor, pares_t$emissor)
+  pares_t$ambos_grande <- as.integer(porte[pares_t$receptor] == "Grande" & porte[pares_t$emissor] == "Grande")
+  for (var_nome in vars_par) {
+    bancos <- pares_disponiveis[[var_nome]]$bancos
+    pares_t[[var_nome]] <- par_especifico(pares_t$receptor, pares_t$emissor, bancos[1], bancos[2])
+  }
   
-  lm_t <- tryCatch(
-    lm(theta_pct ~ factor(emissor) + factor(receptor) +
-         par_itub_bbdc + par_btg_pan + par_bb_brsr + par_abc_san + ambos_grande,
-       data = pares_t),
-    error = function(e) NULL
-  )
+  lm_t <- tryCatch(lm(formula_par_t, data = pares_t), error = function(e) NULL)
   if (is.null(lm_t)) next
   
   cf <- coef(lm_t)
-  coefs_temporais <- rbind(coefs_temporais, data.frame(
-    data         = dt,
-    itub_bbdc    = unname(cf["par_itub_bbdc"]),
-    btg_pan      = unname(cf["par_btg_pan"]),
-    bb_brsr      = unname(cf["par_bb_brsr"]),
-    abc_san      = unname(cf["par_abc_san"]),
-    ambos_grande = unname(cf["ambos_grande"])
-  ))
+  linha <- data.frame(data = dt)
+  for (var_nome in vars_par) linha[[var_nome]] <- unname(cf[var_nome])
+  linha$ambos_grande <- unname(cf["ambos_grande"])
+  coefs_temporais <- rbind(coefs_temporais, linha)
 }
 
 cat("  ", nrow(coefs_temporais), "cortes estimados com sucesso.\n")
@@ -1257,28 +1296,29 @@ resumir_serie <- function(x) {
   )
 }
 
-resumo_temporal <- rbind(
-  cbind(Indicadora = "Bradesco e Itaú (privados nacionais)",    resumir_serie(coefs_temporais$itub_bbdc)),
-  cbind(Indicadora = "BTG e Pan (vínculo societário)",          resumir_serie(coefs_temporais$btg_pan)),
-  cbind(Indicadora = "Banco do Brasil e Banrisul (estatais)",   resumir_serie(coefs_temporais$bb_brsr)),
-  cbind(Indicadora = "ABC Brasil e Santander (\"estrangeiros\")", resumir_serie(coefs_temporais$abc_san)),
-  cbind(Indicadora = "Ambos de grande porte",                   resumir_serie(coefs_temporais$ambos_grande))
-)
+resumo_temporal <- do.call(rbind, c(
+  lapply(vars_par, function(v) cbind(Indicadora = pares_disponiveis[[v]]$label, resumir_serie(coefs_temporais[[v]]))),
+  list(cbind(Indicadora = "Ambos de grande porte", resumir_serie(coefs_temporais$ambos_grande)))
+))
 
 cat("\n  Regressão diádica — extensão temporal (", nrow(coefs_temporais), "cortes mensais):\n")
 print(resumo_temporal, row.names = FALSE)
 
-write.csv(coefs_temporais, "outputs/tabelas/regressao_diadica_temporal_serie.csv", row.names = FALSE)
-write.csv(resumo_temporal, "outputs/tabelas/regressao_diadica_temporal_resumo.csv", row.names = FALSE)
+write.csv(coefs_temporais, outfile("tabelas/regressao_diadica_temporal_serie.csv"), row.names = FALSE)
+write.csv(resumo_temporal, outfile("tabelas/regressao_diadica_temporal_resumo.csv"), row.names = FALSE)
 cat("  Tabelas salvas.\n")
 
 # ── Gráfico: coeficientes diádicos ao longo do tempo ────────────────────────
+niveis_par  <- c(vars_par, "ambos_grande")
+labels_curtos <- c(
+  par_itub_bbdc = "Bradesco e Itaú", par_btg_pan = "BTG e Pan",
+  par_bb_brsr = "BB e Banrisul", par_abc_san = "ABC Brasil e Santander",
+  ambos_grande = "Ambos grande porte"
+)
+
 coefs_long <- coefs_temporais %>%
   pivot_longer(-data, names_to = "par", values_to = "coeficiente") %>%
-  mutate(par = factor(par,
-                      levels = c("itub_bbdc", "btg_pan", "bb_brsr", "abc_san", "ambos_grande"),
-                      labels = c("Bradesco e Itaú", "BTG e Pan", "BB e Banrisul", "ABC Brasil e Santander", "Ambos grande porte")
-  ))
+  mutate(par = factor(par, levels = niveis_par, labels = labels_curtos[niveis_par]))
 
 p_coefs_temporais <- ggplot(coefs_long, aes(x = data, y = coeficiente, color = par)) +
   geom_hline(yintercept = 0, linetype = "dashed", color = "grey40", linewidth = 0.4) +
@@ -1294,19 +1334,26 @@ p_coefs_temporais <- ggplot(coefs_long, aes(x = data, y = coeficiente, color = p
         panel.grid.minor = element_blank(),
         plot.background = element_rect(fill = "white", color = NA))
 
-ggsave("outputs/graficos/coefs_diadicos_temporais.png", p_coefs_temporais, width = 10, height = 12, dpi = 300, bg = "white")
-cat("  Gráfico salvo em outputs/graficos/coefs_diadicos_temporais.png\n")
+ggsave(outfile("graficos/coefs_diadicos_temporais.png"), p_coefs_temporais, width = 10, height = 12, dpi = 300, bg = "white")
+cat("  Gráfico salvo em", outfile("graficos/coefs_diadicos_temporais.png"), "\n")
 
 # ── Médias anuais do coeficiente BTG-Pan ────────────────────────────────────
-coefs_temporais$ano <- format(coefs_temporais$data, "%Y")
-media_anual_btgpan <- aggregate(btg_pan ~ ano, data = coefs_temporais, FUN = mean)
-media_anual_btgpan$btg_pan <- round(media_anual_btgpan$btg_pan, 2)
-
-cat("\n  Coeficiente BTG-Pan — média por ano:\n")
-print(media_anual_btgpan, row.names = FALSE)
-
-write.csv(media_anual_btgpan, "outputs/tabelas/btgpan_coeficiente_anual.csv", row.names = FALSE)
-cat("  Tabela salva em outputs/tabelas/btgpan_coeficiente_anual.csv\n")
+# Só existe no painel que inclui o BPAN4 (N=8 extensão) — no N=7 principal
+# esse par não está presente, então o bloco é pulado.
+if ("par_btg_pan" %in% names(coefs_temporais)) {
+  coefs_temporais$ano <- format(coefs_temporais$data, "%Y")
+  media_anual_btgpan <- aggregate(par_btg_pan ~ ano, data = coefs_temporais, FUN = mean)
+  media_anual_btgpan$par_btg_pan <- round(media_anual_btgpan$par_btg_pan, 2)
+  colnames(media_anual_btgpan) <- c("ano", "btg_pan")
+  
+  cat("\n  Coeficiente BTG-Pan — média por ano:\n")
+  print(media_anual_btgpan, row.names = FALSE)
+  
+  write.csv(media_anual_btgpan, outfile("tabelas/btgpan_coeficiente_anual.csv"), row.names = FALSE)
+  cat("  Tabela salva em", outfile("tabelas/btgpan_coeficiente_anual.csv"), "\n")
+} else {
+  cat("\n  Par BTG-Pan não presente neste painel (sem BPAN4) — tabela anual não gerada.\n")
+}
 
 
 # ==============================================================================
@@ -1386,8 +1433,8 @@ p_rede <- ggraph(layout_fr) +
     legend.background = element_rect(fill = "white", color = NA)
   )
 
-ggsave("outputs/graficos/rede_full_sample.png", p_rede, width = 11, height = 8, dpi = 300, bg = "white")
-cat("  Grafo salvo em outputs/graficos/rede_full_sample.png\n")
+ggsave(outfile("graficos/rede_full_sample.png"), p_rede, width = 11, height = 8, dpi = 300, bg = "white")
+cat("  Grafo salvo em", outfile("graficos/rede_full_sample.png"), "\n")
 
 
 # ==============================================================================
@@ -1488,8 +1535,8 @@ p_subperiodos <- wrap_plots(paineis_sub, ncol = 2) +
                   plot.background = element_rect(fill = "white", color = NA))
   ) & theme(plot.background = element_rect(fill = "white", color = NA))
 
-ggsave("outputs/graficos/rede_subperiodos.png", p_subperiodos, width = 12, height = 10, dpi = 300, bg = "white")
-cat("  Painel de subperíodos salvo em outputs/graficos/rede_subperiodos.png (", length(paineis_sub), "de", length(SUBPERIODOS), "subperíodos estimados)\n")
+ggsave(outfile("graficos/rede_subperiodos.png"), p_subperiodos, width = 12, height = 10, dpi = 300, bg = "white")
+cat("  Painel de subperíodos salvo em", outfile("graficos/rede_subperiodos.png"), "(", length(paineis_sub), "de", length(SUBPERIODOS), "subperíodos estimados)\n")
 
 
 # ==============================================================================
@@ -1518,7 +1565,7 @@ for (p_alt in 1:4) {
   ))
 }
 cat("  Resultado:\n"); print(robustez_p, row.names = FALSE)
-write.csv(robustez_p, "outputs/tabelas/robustez_lags.csv", row.names = FALSE)
+write.csv(robustez_p, outfile("tabelas/robustez_lags.csv"), row.names = FALSE)
 
 # ── B. Sensibilidade ao horizonte da GFEVD (H) ──────────────────────────────
 cat("\n  B) Variando H (horizonte da GFEVD, full sample estático)...\n")
@@ -1534,7 +1581,7 @@ for (h_alt in c(5, 10, 15, 20)) {
   ))
 }
 cat("  Resultado:\n"); print(robustez_h, row.names = FALSE)
-write.csv(robustez_h, "outputs/tabelas/robustez_horizonte.csv", row.names = FALSE)
+write.csv(robustez_h, outfile("tabelas/robustez_horizonte.csv"), row.names = FALSE)
 
 # ── C. Sensibilidade ao tamanho da janela rolante (W) ───────────────────────
 # Reaproveita as três séries já calculadas na Seção 11 (tci_comparacao).
@@ -1553,7 +1600,7 @@ cor_w <- cor(wide_w[, c("W = 150", "W = 200", "W = 250")])
 
 cat("  TCI médio/DP por janela:\n"); print(robustez_w, row.names = FALSE)
 cat("  Correlação entre séries (datas em comum):\n"); print(round(cor_w, 3))
-write.csv(robustez_w, "outputs/tabelas/robustez_janela.csv", row.names = FALSE)
+write.csv(robustez_w, outfile("tabelas/robustez_janela.csv"), row.names = FALSE)
 
 # ── D. Sensibilidade aos fatores de esquecimento (kappa1, kappa2) ──────────
 # Reestima só os 2 próximos pares mais bem colocados na grade (Seção 12) —
@@ -1592,7 +1639,7 @@ for (i in seq_len(nrow(top3_kappa))) {
   ))
 }
 cat("  Resultado:\n"); print(robustez_kappa, row.names = FALSE)
-write.csv(robustez_kappa, "outputs/tabelas/robustez_kappa.csv", row.names = FALSE)
+write.csv(robustez_kappa, outfile("tabelas/robustez_kappa.csv"), row.names = FALSE)
 
 # ── E. Sub-amostras (primeira vs. segunda metade do período) ───────────────
 cat("\n  E) Sub-amostras — primeira vs. segunda metade do período...\n")
@@ -1616,7 +1663,7 @@ for (nome_sub in c("Primeira metade", "Segunda metade")) {
   ))
 }
 cat("  Resultado:\n"); print(robustez_sub, row.names = FALSE)
-write.csv(robustez_sub, "outputs/tabelas/robustez_subamostras.csv", row.names = FALSE)
+write.csv(robustez_sub, outfile("tabelas/robustez_subamostras.csv"), row.names = FALSE)
 
 # ── Checagem final: a identidade do maior transmissor/receptor se mantém? ──
 transmissores <- c(robustez_p$Maior_transmissor, robustez_h$Maior_transmissor,
@@ -1635,5 +1682,5 @@ print(table(receptores))
 # ==============================================================================
 # Versões de pacote afetam resultados de auto.arima() (Seção 7) e do layout
 # Fruchterman-Reingold (Seção 16) — salvar para referência.
-writeLines(capture.output(sessionInfo()), "outputs/sessionInfo.txt")
-cat("\n  sessionInfo() salva em outputs/sessionInfo.txt\n")
+writeLines(capture.output(sessionInfo()), outfile("sessionInfo.txt"))
+cat("\n  sessionInfo() salva em", outfile("sessionInfo.txt"), "\n")
