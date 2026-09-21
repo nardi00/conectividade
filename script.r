@@ -288,6 +288,43 @@ if (all(c("BPAN4", "BPAC11") %in% NOMES)) {
     cat("      últimos", k, "dias:", round(cor_k, 4), "\n")
   }
   
+  # ── Detecção automática do início da convergência ──────────────────────────
+  # Usa uma janela mais curta (10 dias) que reage mais rápido a mudanças de
+  # regime do que a série de 30 dias usada no gráfico principal (corr_roll).
+  # Define o início da convergência como o primeiro pregão em que a
+  # correlação móvel ultrapassa um limiar e se mantém acima dele de forma
+  # sustentada nos pregões seguintes — não um pico isolado de ruído.
+  JANELA_CURTA      <- 10
+  LIMIAR_CONV       <- 0.7
+  DIAS_SUSTENTACAO  <- 10
+  
+  ret_df$corr_curta <- zoo::rollapply(
+    ret_df[, c("ret_bpan4", "ret_bpac11")], width = JANELA_CURTA,
+    FUN = function(x) cor(x[, 1], x[, 2], use = "complete.obs"),
+    by.column = FALSE, align = "right", fill = NA
+  )
+  
+  pos_idx <- which(ret_df$Data >= ANUNCIO_INCORPORACAO)
+  data_convergencia <- as.Date(NA)
+  
+  for (i in pos_idx) {
+    if (is.na(ret_df$corr_curta[i]) || ret_df$corr_curta[i] < LIMIAR_CONV) next
+    janela_seguinte <- i:min(i + DIAS_SUSTENTACAO - 1, nrow(ret_df))
+    sustentado <- all(!is.na(ret_df$corr_curta[janela_seguinte])) &&
+      all(ret_df$corr_curta[janela_seguinte] >= LIMIAR_CONV)
+    if (sustentado) {
+      data_convergencia <- ret_df$Data[i]
+      break
+    }
+  }
+  
+  if (!is.na(data_convergencia)) {
+    cat("    Início da convergência (correlação móvel de", JANELA_CURTA, "dias, sustentada por >=",
+        DIAS_SUSTENTACAO, "pregões acima de", LIMIAR_CONV, "):", as.character(data_convergencia), "\n")
+  } else {
+    cat("    Nenhuma data de convergência sustentada identificada com os critérios atuais.\n")
+  }
+  
   # Série de correlação móvel (30 dias) — só para o gráfico, não para os
   # números acima.
   JANELA_ROLL <- 30
@@ -1334,6 +1371,23 @@ p_coefs_temporais <- ggplot(coefs_long, aes(x = data, y = coeficiente, color = p
 
 ggsave(outfile("graficos/coefs_diadicos_temporais.png"), p_coefs_temporais, width = 10, height = 12, dpi = 300, bg = "white")
 cat("  Gráfico salvo em", outfile("graficos/coefs_diadicos_temporais.png"), "\n")
+
+if ("BTG e Pan" %in% levels(coefs_long$par)) {
+  p_coef_btgpan <- coefs_long %>%
+    filter(par == "BTG e Pan") %>%
+    ggplot(aes(x = data, y = coeficiente)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey40", linewidth = 0.4) +
+    geom_line(linewidth = 0.8, color = "#b2182b") +
+    scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+    labs(x = NULL, y = "Coeficiente (p.p.)") +
+    theme_minimal(base_size = 13) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          panel.grid.minor = element_blank(),
+          plot.background = element_rect(fill = "white", color = NA))
+  
+  ggsave(outfile("graficos/coef_btgpan_temporal.png"), p_coef_btgpan, width = 9, height = 4.5, dpi = 300, bg = "white")
+  cat("  Gráfico salvo em", outfile("graficos/coef_btgpan_temporal.png"), "\n")
+}
 
 # ── Médias anuais do coeficiente BTG-Pan ────────────────────────────────────
 # Só existe no painel que inclui o BPAN4 (N=8 extensão) — no N=7 principal
