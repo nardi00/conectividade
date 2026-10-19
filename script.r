@@ -38,7 +38,7 @@ CONFIG_PAINEIS <- list(
   N7_principal = list(
     nomes       = c("ITUB4", "BBDC4", "BBAS3", "SANB11", "BPAC11", "BRSR6", "ABCB4"),
     data_inicio = "2017-10-01",
-    data_fim    = "2026-05-29"
+    data_fim    = "2026-09-30"
   ),
   N8_extensao = list(
     nomes       = c("ITUB4", "BBDC4", "BBAS3", "SANB11", "BPAC11", "BRSR6", "ABCB4", "BPAN4"),
@@ -50,7 +50,7 @@ CONFIG_PAINEIS <- list(
 stopifnot("PAINEL precisa ser 'N7_principal' ou 'N8_extensao'" = PAINEL %in% names(CONFIG_PAINEIS))
 cfg <- CONFIG_PAINEIS[[PAINEL]]
 
-CAMINHO_EXCEL <- "Cotacoes_ComDinheiro_8bancos_2014-2026.xlsx"
+CAMINHO_EXCEL <- "Bancos_Cotacoes_Comdinheiro.xlsx" # Cotacoes_ComDinheiro_8bancos_2014-2026.xlsx  ou Bancos_Cotacoes_Comdinheiro.xlsx
 NOMES         <- cfg$nomes
 DATA_INICIO   <- cfg$data_inicio
 DATA_FIM      <- cfg$data_fim
@@ -169,8 +169,11 @@ cat("\n[3/11] Aplicando filtro de liquidez...\n")
 
 # Filtro por volume financeiro (Volume_MM_RS). A planilha também tem a
 # coluna Negocios (número de negócios do dia) como possível critério
-# complementar de liquidez, não incorporado aqui ainda.
+# complementar de liquidez.
 VOLUME_MIN_BRL <- 100000
+contagem_liquidez <- list()
+
+
 
 for (nome in NOMES) {
   d       <- dados_adj[[nome]]
@@ -178,6 +181,7 @@ for (nome in NOMES) {
   filtro  <- !is.na(vol_brl) & (vol_brl < VOLUME_MIN_BRL)
   
   n_filtrados <- sum(filtro)
+  contagem_liquidez[[nome]] <- n_filtrados
   if (n_filtrados > 0) {
     cat("  ", nome, ":", n_filtrados, "dia(s) com baixa liquidez → NA\n")
     dados_adj[[nome]][filtro, c("Open","High","Low","Close")] <- NA
@@ -373,11 +377,30 @@ rogers_satchell_overnight <- function(ohlc_mat) {
   rs         <- log(H / C) * log(H / O) + log(L / C) * log(L / O)   # Rogers-Satchell
   
   sig2 <- overnight2 + rs
-  sig2[!is.na(sig2) & sig2 < 0] <- NA          # RS pode sair negativo por ruído de 
-  # microestrutura em dias de range muito
-  # estreito — tratado como NA, não como zero
-  sqrt(sig2)                                    # desvio-padrão diário, não anualizado
+  idx_regra <- which(!is.na(sig2) & sig2 < 1e-8)
+  sig2[idx_regra] <- NA       # [INCLUSÃO — Diego, 24/09/2026] Substitui a linha anterior
+  # (sig2 < 0 → NA). Por quê: num pregão que abre no fechamento anterior e na máxima e fecha na
+  # mínima (ou abre na mínima e fecha na máxima), os três termos se anulam — log(O/C_lag) = 0,
+  # log(H/O) = 0 e log(L/C) = 0 — e o estimador dá variância zero por construção, embora o papel
+  # tenha percorrido toda a amplitude do dia (2% a 6% nos casos da amostra; registros conferidos
+  # no COTAHIST da B3, não são erro de dado). RS é não negativo com OHLC consistente: o valor
+  # negativo que a regra antiga capturava não vinha de microestrutura, e sim do ruído de ponto
+  # flutuante do fator de ajuste, que deixa esses dias em ±1e-12. Com sinal negativo, o dia virava
+  # NA; com sinal positivo, entrava no VAR como log-vol ≈ −11 (14 a 19 desvios da média), inflando
+  # a variância própria e derrubando o TCI. O limiar trata os dois casos da mesma forma: dia sem
+  # informação para o estimador de um dia → NA → imputação por Kalman na Seção 7. O limiar de
+  # 1e-8 (desvio-padrão diário de 0,01%) está muito abaixo do 1º percentil de qualquer série;
+  # 1e-6 dá resultados praticamente idênticos. Ver Feedback 4, Seção 3.1.
+  
+  valido <- !is.na(sig2)
+  p_on   <- 100 * sum(overnight2[valido]) / sum(sig2[valido])   # parcela do overnight (%)
+  
+  out <- sqrt(sig2)                             # desvio-padrão diário, não anualizado
+  attr(out, "datas_regra") <- index(ohlc_mat)[idx_regra]
+  attr(out, "parcela_overnight") <- p_on
+  out                             # desvio-padrão diário, não anualizado
 }
+
 
 # Apêndice (não usado na especificação principal): Garman-Klass, convenção
 # Diebold-Yilmaz.
@@ -389,6 +412,9 @@ rogers_satchell_overnight <- function(ohlc_mat) {
 # }
 
 vol_rs <- list()
+contagem_regra <- list()
+parcela_overnight <- list()
+
 
 for (nome in NOMES) {
   d <- dados_adj[[nome]]
@@ -398,12 +424,38 @@ for (nome in NOMES) {
   if (n_nas > 0) cat(" ", nome, ":", n_nas, "NAs no OHLC (mantidos até a Seção 7)\n")
   
   sd_diario <- rogers_satchell_overnight(ohlc_mat)
-  vol_anual <- sd_diario * sqrt(252)   # anualizado, convenção Diebold-Yilmaz (2012, 2014)
+  parcela_overnight[[nome]] <- data.frame(
+    Banco = nome,
+    Parcela_overnight_pct = round(attr(sd_diario, "parcela_overnight"), 1)
+  )
+  
+  # Pregões removidos pela regra sig2 < 1e-8 (só os que tinham OHLC válido)
+  datas_regra <- attr(sd_diario, "datas_regra")
+  contagem_regra[[nome]] <- data.frame(
+    Banco                = nome,
+    Pregoes              = nrow(ohlc_mat),
+    Removidos_pela_regra = length(datas_regra),
+    Pct                  = round(100 * length(datas_regra) / nrow(ohlc_mat), 2)
+  )
+  if (length(datas_regra) > 0)
+    cat("   ", nome, "→ pregões de variância nula:", paste(format(datas_regra), collapse = ", "), "\n")
+  
+  vol_anual <- as.numeric(sd_diario) * sqrt(252)   # anualizado, convenção Diebold-Yilmaz (2012, 2014)
   vol_rs[[nome]] <- xts(vol_anual, order.by = index(d))
   
   n_nas_vol <- sum(is.na(vol_anual))
   if (n_nas_vol > 0) cat("   ", nome, "→", n_nas_vol, "NAs na volatilidade estimada\n")
 }
+
+parcela_overnight <- do.call(rbind, parcela_overnight); rownames(parcela_overnight) <- NULL
+cat("\n  Parcela do termo overnight na soma de sigma2 (%):\n")
+print(parcela_overnight, row.names = FALSE)
+write.csv(parcela_overnight, outfile("tabelas/parcela_overnight.csv"), row.names = FALSE)
+
+contagem_regra <- do.call(rbind, contagem_regra); rownames(contagem_regra) <- NULL
+cat("\n  Pregões removidos pela regra sig2 < 1e-8 (por banco):\n")
+print(contagem_regra, row.names = FALSE)
+write.csv(contagem_regra, outfile("tabelas/dias_variancia_nula.csv"), row.names = FALSE)
 
 cat("  OK — volatilidade Rogers-Satchell+overnight estimada para", length(vol_rs), "séries.\n")
 
@@ -432,8 +484,11 @@ cat("  OK — log-volatilidade calculada para", length(log_vol), "séries.\n")
 
 cat("\n[7/11] Alinhando painel T×8 e imputando NAs (filtro de Kalman)...\n")
 
+
+
 painel_raw <- do.call(merge, c(log_vol, all = TRUE))
 colnames(painel_raw) <- NOMES
+n_imputados <- colSums(is.na(painel_raw))   
 
 cat("\n  NAs por banco (antes da imputação):\n")
 print(colSums(is.na(painel_raw)))
@@ -452,6 +507,16 @@ painel_imp <- xts(painel_imp, order.by = index(painel_raw))
 colnames(painel_imp) <- NOMES
 
 stopifnot("Ainda há NAs no painel após imputação!" = sum(is.na(painel_imp)) == 0)
+
+tabela_pretratamento <- data.frame(
+  Banco                     = NOMES,
+  Dias_abaixo_piso_liquidez = as.integer(unlist(contagem_liquidez[NOMES])),
+  Dias_variancia_nula       = contagem_regra$Removidos_pela_regra[match(NOMES, contagem_regra$Banco)],
+  Total_imputado            = as.integer(n_imputados[NOMES])
+)
+cat("\n  Pré-tratamento por banco:\n")
+print(tabela_pretratamento, row.names = FALSE)
+write.csv(tabela_pretratamento, outfile("tabelas/pretratamento_por_banco.csv"), row.names = FALSE)
 
 cat("  OK — painel final:", nrow(painel_imp), "observações ×", ncol(painel_imp), "bancos. Zero NAs.\n")
 
@@ -628,10 +693,25 @@ rownames(tabela_dy) <- NULL
 cat("\n  Tabela DY (full sample):\n")
 print(tabela_dy)
 
+# ── Demonstração: o nível do TCI sobe com N ────────────────────────────────
+if (PAINEL == "N7_principal") {
+  set.seed(1)
+  tci_vs_n <- do.call(rbind, lapply(c(2, 4, 6, 7), function(n) {
+    tcis <- replicate(20, {
+      sub <- sample(colnames(Y), n)
+      as.numeric(ConnectednessApproach(Y[, sub], nlag = P_LAGS, nfore = H_HORIZONTE,
+                                       window = NULL, corrected = FALSE, model = "VAR")$TCI)
+    })
+    data.frame(N = n, TCI_medio = round(mean(tcis), 1))
+  }))
+  cat("\n  TCI médio da amostra completa por número de bancos:\n")
+  print(tci_vs_n, row.names = FALSE)
+  write.csv(tci_vs_n, outfile("tabelas/tci_vs_N.csv"), row.names = FALSE)
+}
+
 write.csv(tabela_dy, outfile("tabelas/dy_fullsample.csv"), row.names = FALSE)
 write.csv(tabela_gfevd, outfile("tabelas/gfevd_fullsample.csv"))
 cat("  Tabelas salvas.\n")
-
 
 # ==============================================================================
 # SEÇÃO 11 (APÊNDICE) — JANELA ROLANTE (W = 200, H = 10)
@@ -1100,27 +1180,27 @@ write.csv(tabela_dy_rede, outfile("tabelas/dy_centralidade_fullsample.csv"), row
 cat("  Salvo em", outfile("tabelas/dy_centralidade_fullsample.csv"), "\n")
 
 # ── Confronto com a segmentação prudencial do BCB ───────────────────────────
-# O BCB não publica uma lista numerada de D-SIBs (diferente de jurisdições
-# como Índia/RBI) — usa a segmentação prudencial S1-S5 (Res. CMN, baseada
-# no arcabouço de Basileia). O segmento S1 (exposição >=10% do PIB ou
-# atividade internacional relevante) é sujeito integralmente aos buffers de
-# capital sistêmico de Basileia e funciona como o equivalente brasileiro ao
-# D-SIB. Fonte: bcb.gov.br/estabilidadefinanceira/regprudencialsegmentacao
-# (S1: Banco do Brasil, Bradesco, BTG Pactual, Caixa Econômica Federal,
-# Itaú, Santander; S2 inclui o Banrisul).
+# O ranking comparado ao S1 é de TRANSMISSÃO (TOi, Eq. 6.11): um banco
+# sistemicamente importante é aquele cujo estresse se propaga ao sistema.
+# PageRank/eigenvector_in medem receptividade (direção de entrada) e ficam na
+# tabela apenas como métricas complementares.
+# Base normativa: Res. CMN 4.553/2017 (segmentação S1-S5) e Res. CMN 4.958/2021,
+# art. 8º, §2º (ACPSistêmico se aplica ao S1).
+# S1: Banco do Brasil, Bradesco, BTG Pactual, Caixa, Itaú, Santander;
+# S2 inclui o Banrisul.
 segmento_bcb <- c(
   ITUB4 = "S1", BBDC4 = "S1", BBAS3 = "S1", SANB11 = "S1", BPAC11 = "S1",
   BRSR6 = "S2", ABCB4 = "S3", BPAN4 = "S3"
 )
 
-comparacao_dsib <- metricas_centralidade
+comparacao_dsib <- tabela_dy_rede   # TO, FROM, NET, Eigenvector_in, PageRank
 comparacao_dsib$Segmento_BCB <- segmento_bcb[comparacao_dsib$Banco]
 comparacao_dsib$S1_BCB       <- comparacao_dsib$Segmento_BCB == "S1"
-comparacao_dsib <- comparacao_dsib[order(-comparacao_dsib$PageRank), ]
-comparacao_dsib$Rank_rede_PageRank <- seq_len(nrow(comparacao_dsib))
+comparacao_dsib <- comparacao_dsib[order(-comparacao_dsib$TO), ]
+comparacao_dsib$Rank_rede_TO <- seq_len(nrow(comparacao_dsib))
 rownames(comparacao_dsib) <- NULL
 
-cat("\n  Confronto: ranking de rede (PageRank) vs. segmentação prudencial do BCB (S1-S5):\n")
+cat("\n  Confronto: ranking de transmissão (TOi) vs. segmentação prudencial do BCB (S1-S5):\n")
 print(comparacao_dsib)
 
 write.csv(comparacao_dsib, outfile("tabelas/comparacao_dsib.csv"), row.names = FALSE)
@@ -1142,41 +1222,50 @@ porte <- c(
   BPAC11 = "Grande", BRSR6 = "Médio", ABCB4 = "Médio", BPAN4 = "Médio"
 )
 
-# ── Regressão diádica (substitui a assortatividade) ────────────────────────
-# Unidade de observação: o par ordenado (i,j), i != j — 56 linhas (8x7).
-# Variável dependente: theta_ij x 100 (Eq. 9). alpha_j e gamma_i são
-# efeitos fixos de emissor e receptor — absorvem a propensão geral de cada
-# banco a transmitir/receber de QUALQUER contraparte. O que sobra em
-# mesmo_controle/ambos_grande é o que aquele PAR específico tem de
-# particular, descontada essa propensão geral.
+# ── Regressão diádica 
+
 cat("\n  Montando painel diádico (pares i != j)...\n")
+
+estatal  <- c("BBAS3", "BRSR6")
+natureza <- function(b) ifelse(b %in% estatal, "Estatal", "Privado")
 
 pares_ij <- expand.grid(receptor = NOMES, emissor = NOMES, stringsAsFactors = FALSE)
 pares_ij <- pares_ij[pares_ij$receptor != pares_ij$emissor, ]
 
-pares_ij$theta_pct       <- mapply(function(i, j) theta_offdiag[i, j] * 100,
-                                   pares_ij$receptor, pares_ij$emissor)
-pares_ij$mesmo_controle  <- as.integer(tipo_controle[pares_ij$receptor] == tipo_controle[pares_ij$emissor])
-pares_ij$ambos_grande    <- as.integer(porte[pares_ij$receptor] == "Grande" & porte[pares_ij$emissor] == "Grande")
-pares_ij$par_id          <- apply(cbind(pares_ij$receptor, pares_ij$emissor), 1, function(x) paste(sort(x), collapse = "-"))
+pares_ij$theta_pct      <- mapply(function(i, j) theta_offdiag[i, j] * 100,
+                                  pares_ij$receptor, pares_ij$emissor)
+pares_ij$mesmo_controle <- as.integer(natureza(pares_ij$receptor) == natureza(pares_ij$emissor))
+pares_ij$ambos_grande   <- as.integer(porte[pares_ij$receptor] == "Grande" & porte[pares_ij$emissor] == "Grande")
+pares_ij$par_id         <- apply(cbind(pares_ij$receptor, pares_ij$emissor), 1, function(x) paste(sort(x), collapse = "-"))
+pares_ij$vinculo        <- as.integer(pares_ij$par_id == "BPAC11-BPAN4")   # sempre 0 no N=7
 
 cat("  ", nrow(pares_ij), "observações (pares dirigidos),", length(unique(pares_ij$par_id)), "pares não-dirigidos (clusters)\n")
 
-lm_diadica <- lm(theta_pct ~ factor(emissor) + factor(receptor) + mesmo_controle + ambos_grande,
-                 data = pares_ij)
+termos <- c("mesmo_controle", "ambos_grande")
+if ("BPAN4" %in% NOMES) termos <- c(termos, "vinculo")   # só no painel de extensão
+
+lm_diadica <- lm(
+  as.formula(paste("theta_pct ~ factor(emissor) + factor(receptor) +", paste(termos, collapse = " + "))),
+  data = pares_ij
+)
 
 # Erros-padrão clusterizados por par não-dirigido: theta_ij e theta_ji
 # nascem da mesma relação bilateral, resíduos não são independentes.
-vcov_cluster <- sandwich::vcovCL(lm_diadica, cluster = pares_ij$par_id)
+vcov_cluster  <- sandwich::vcovCL(lm_diadica, cluster = pares_ij$par_id)
 teste_diadica <- lmtest::coeftest(lm_diadica, vcov = vcov_cluster)
 
+rotulos <- c(mesmo_controle = "Mesma natureza de controle (estatal/privado)",
+             ambos_grande   = "Ambos de grande porte",
+             vinculo        = "Vínculo societário (BTG e Pan)")
+
 resultado_diadica <- data.frame(
-  Indicadora  = c("Mesmo tipo de controle", "Ambos de grande porte"),
-  Coeficiente = round(teste_diadica[c("mesmo_controle", "ambos_grande"), "Estimate"], 3),
-  Erro_padrao = round(teste_diadica[c("mesmo_controle", "ambos_grande"), "Std. Error"], 3),
-  t           = round(teste_diadica[c("mesmo_controle", "ambos_grande"), "t value"], 2),
-  p           = round(teste_diadica[c("mesmo_controle", "ambos_grande"), "Pr(>|t|)"], 4)
+  Indicadora  = unname(rotulos[termos]),
+  Coeficiente = round(teste_diadica[termos, "Estimate"], 3),
+  Erro_padrao = round(teste_diadica[termos, "Std. Error"], 3),
+  t           = round(teste_diadica[termos, "t value"], 2),
+  p           = round(teste_diadica[termos, "Pr(>|t|)"], 4)
 )
+rownames(resultado_diadica) <- NULL
 
 cat("\n  Regressão diádica — coeficientes de interesse (p.p. de variância explicada):\n")
 print(resultado_diadica, row.names = FALSE)
@@ -1655,23 +1744,36 @@ cat("  Correlação entre séries (datas em comum):\n"); print(round(cor_w, 3))
 write.csv(robustez_w, outfile("tabelas/robustez_janela.csv"), row.names = FALSE)
 
 # ── D. Sensibilidade aos fatores de esquecimento (kappa1, kappa2) ──────────
-# Reestima só os 2 próximos pares mais bem colocados na grade (Seção 12) —
-# o vencedor (KAPPA1/KAPPA2) já foi calculado como dca_tvp e é reaproveitado.
-# AVISO: cada par não reaproveitado roda o TVP-VAR completo de novo — pode
-# levar alguns minutos por par.
-cat("\n  D) Variando (kappa1, kappa2) — top 3 da grade de verossimilhança...\n")
+# Avalia o par selecionado e seus vizinhos imediatos na grade (um passo em
+# kappa1 ou em kappa2, com o outro fixo e kappa1 < 1). Critério de proximidade,
+# não de ordenação por peso posterior: fora dos dois primeiros pares os pesos
+# são numericamente nulos. O par selecionado reaproveita dca_tvp.
+# AVISO: cada vizinho roda o TVP-VAR completo de novo (alguns minutos).
+cat("\n  D) Variando (kappa1, kappa2) — par selecionado e vizinhos na grade...\n")
 
-# kappa1 = 1 (coeficientes constantes) é um caso de fronteira que nosso
-# filtro de Kalman (usado só para a busca em grade) lida bem, mas o
-# ConnectednessApproach exige kappa1 ESTRITAMENTE entre 0 e 1 para estimar
-# o TVP-VAR de fato — excluído aqui antes de escolher o top 3 a reestimar.
-top3_kappa <- head(grade_tabela[grade_tabela$kappa1 < 1, ], 3)
+vizinhos_grade <- function(k1, k2, g1 = grade_k1, g2 = grade_k2) {
+  i1 <- which(g1 == k1); i2 <- which(g2 == k2)
+  idx1 <- c(i1 - 1, i1 + 1); idx1 <- idx1[idx1 >= 1 & idx1 <= length(g1)]
+  idx2 <- c(i2 - 1, i2 + 1); idx2 <- idx2[idx2 >= 1 & idx2 <= length(g2)]
+  cand <- rbind(data.frame(kappa1 = g1[idx1], kappa2 = k2),
+                data.frame(kappa1 = k1,       kappa2 = g2[idx2]))
+  cand[cand$kappa1 < 1, ]
+}
+
+pares_robustez <- rbind(
+  data.frame(kappa1 = KAPPA1, kappa2 = KAPPA2, Tipo = "Selecionado"),
+  transform(vizinhos_grade(KAPPA1, KAPPA2), Tipo = "Vizinho")
+)
+pares_robustez$peso_posterior <- grade_tabela$peso_post[
+  match(paste(pares_robustez$kappa1, pares_robustez$kappa2),
+        paste(grade_tabela$kappa1, grade_tabela$kappa2))
+]
+
 robustez_kappa <- data.frame()
-
-for (i in seq_len(nrow(top3_kappa))) {
-  k1 <- top3_kappa$kappa1[i]; k2 <- top3_kappa$kappa2[i]
+for (i in seq_len(nrow(pares_robustez))) {
+  k1 <- pares_robustez$kappa1[i]; k2 <- pares_robustez$kappa2[i]
   
-  if (isTRUE(all.equal(k1, KAPPA1)) && isTRUE(all.equal(k2, KAPPA2))) {
+  if (pares_robustez$Tipo[i] == "Selecionado") {
     dca_k <- dca_tvp   # já calculado na Seção 12
   } else {
     cat("    Estimando TVP-VAR para kappa1 =", k1, ", kappa2 =", k2, "...\n")
@@ -1681,13 +1783,15 @@ for (i in seq_len(nrow(top3_kappa))) {
     )
   }
   
-  tci_k <- as.numeric(dca_k$TCI[, 1])
+  tci_k       <- as.numeric(dca_k$TCI[, 1])
   net_medio_k <- colMeans(dca_k$NET)
   
   robustez_kappa <- rbind(robustez_kappa, data.frame(
-    kappa1 = k1, kappa2 = k2, peso_posterior = round(top3_kappa$peso_post[i], 4),
+    kappa1 = k1, kappa2 = k2, Tipo = pares_robustez$Tipo[i],
+    peso_posterior = round(pares_robustez$peso_posterior[i], 4),
     TCI_medio = round(mean(tci_k, na.rm = TRUE), 2),
-    Maior_transmissor = NOMES[which.max(net_medio_k)], Maior_receptor = NOMES[which.min(net_medio_k)]
+    Maior_transmissor = NOMES[which.max(net_medio_k)],
+    Maior_receptor    = NOMES[which.min(net_medio_k)]
   ))
 }
 cat("  Resultado:\n"); print(robustez_kappa, row.names = FALSE)
@@ -1727,7 +1831,6 @@ cat("\n  Estabilidade do maior transmissor líquido em", length(transmissores), 
 print(table(transmissores))
 cat("\n  Estabilidade do maior receptor líquido em", length(receptores), "especificações:\n")
 print(table(receptores))
-
 
 # ==============================================================================
 # REPRODUTIBILIDADE — sessionInfo()

@@ -1,6 +1,6 @@
 "Indicadora","Coeficiente","Erro_padrao","t","p"
-"Bradesco e Itaú (privados nacionais)",6.245,0.74,8.44,0
-"BTG e Pan (vínculo societário)",5.936,0.82,7.24,0
-"Banco do Brasil e Banrisul (estatais)",0.468,0.506,0.93,0.3611
-"ABC Brasil e Santander (""estrangeiros"")",-2.291,0.858,-2.67,0.0113
-"Ambos de grande porte",4.103,0.768,5.34,0
+"Bradesco e Itaú (privados nacionais)",5.338,0.846,6.31,0
+"BTG e Pan (vínculo societário)",5.455,0.939,5.81,0
+"Banco do Brasil e Banrisul (estatais)",1.13,0.617,1.83,0.0751
+"ABC Brasil e Santander (""estrangeiros"")",-1.221,0.994,-1.23,0.2271
+"Ambos de grande porte",3.101,1.005,3.09,0.0039

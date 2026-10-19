@@ -1,3 +1,4 @@
 "Indicadora","Coeficiente","Erro_padrao","t","p"
-"Mesmo tipo de controle",3.387,1.846,1.84,0.0741
-"Ambos de grande porte",4.744,0.95,4.99,0
+"Mesma natureza de controle (estatal/privado)",0.796,0.377,2.11,0.0414
+"Ambos de grande porte",3.921,1.154,3.4,0.0016
+"Vínculo societário (BTG e Pan)",5.917,1.169,5.06,0
