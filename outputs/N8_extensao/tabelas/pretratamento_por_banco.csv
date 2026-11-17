@@ -1,9 +1,9 @@
 "Banco","Dias_abaixo_piso_liquidez","Dias_variancia_nula","Total_imputado"
-"ITUB4",0,0,1
-"BBDC4",0,0,1
-"BBAS3",0,1,2
-"SANB11",0,2,3
-"BPAC11",0,1,2
-"BRSR6",0,3,4
-"ABCB4",0,4,5
-"BPAN4",1,2,5
+"ITUB4",0,0,0
+"BBDC4",0,0,0
+"BBAS3",0,1,1
+"SANB11",0,2,2
+"BPAC11",0,1,1
+"BRSR6",0,3,3
+"ABCB4",0,4,4
+"BPAN4",1,2,4

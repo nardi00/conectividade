@@ -1,0 +1,4 @@
+"kappa1","kappa2","Tipo","peso_posterior","TCI_medio","Maior_transmissor","Maior_receptor"
+0.995,0.99,"Selecionado",1,50.49,"ITUB4","BRSR6"
+0.99,0.99,"Vizinho",0,49.59,"ITUB4","BRSR6"
+0.995,0.96,"Vizinho",0,50.11,"ITUB4","BRSR6"

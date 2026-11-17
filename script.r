@@ -32,7 +32,7 @@ library(patchwork)
 # Alterna entre os dois painéis
 # Trocar PAINEL e rodar o script de novo — cada painel grava em sua própria
 # subpasta (outputs/N7_principal/, outputs/N8_extensao/), nunca se sobrepõem.
-PAINEL <- "N8_extensao"   # N7_principal ou N8_extensao
+PAINEL <- "N7_ate_0730"   # N7_principal ou N8_extensao ou N7_ate_0730
 
 CONFIG_PAINEIS <- list(
   N7_principal = list(
@@ -44,6 +44,11 @@ CONFIG_PAINEIS <- list(
     nomes       = c("ITUB4", "BBDC4", "BBAS3", "SANB11", "BPAC11", "BRSR6", "ABCB4", "BPAN4"),
     data_inicio = "2019-01-01",
     data_fim    = "2025-10-13"
+  ),
+  N7_ate_0730 = list(   # painel principal encerrado no último fechamento antes do fato relevante do Santander
+    nomes       = c("ITUB4", "BBDC4", "BBAS3", "SANB11", "BPAC11", "BRSR6", "ABCB4"),
+    data_inicio = "2017-10-01",
+    data_fim    = "2026-07-30"
   )
 )
 
@@ -67,13 +72,29 @@ dir.create(outfile("graficos"), recursive = TRUE, showWarnings = FALSE)
 N_JANELA_W    <- 200
 H_HORIZONTE   <- 10
 P_LAGS        <- 2
-THRESHOLD_REL <- 0.05   # threshold relativo do grafo NET colapsado (Seção 14)
+THRESHOLD_REL <- 0.05   # threshold relativo do grafo NET colapsado (Seção 16)
+
+# Grade de kappa2: o ótimo (0,99) está na borda da grade. TRUE acrescenta 0,995
+# (6 pares a mais; alguns minutos a mais). Mantido FALSE para reproduzir os números
+# do texto; se virar TRUE, a Tabela da grade e o texto da Seção 4.3 precisam ser refeitos.
+ESTENDER_GRADE_K2 <- FALSE
+
 
 EVENTOS <- data.frame(
-  data  = as.Date(c("2020-03-11", "2021-03-17", "2023-01-12", "2024-10-01")),
-  label = c("COVID-19", "Aperto Selic", "Americanas", "Crise Fiscal 2024"),
+  data  = as.Date(c("2020-03-11", "2021-03-17", "2023-01-11", "2024-11-27", "2026-04-08")),
+  label = c("Pandemia (OMS)", "Copom eleva a Selic", "Americanas", "Pacote fiscal", "Cessar-fogo EUA–Irã"),
+  ylab  = c(82, 78, 82, 78, 86),     # alturas alternadas, no topo, acima da curva
+  hj    = c(0, 0, 0, 0, 1),          # o último rótulo fica à esquerda da linha (borda direita)
   stringsAsFactors = FALSE
 )
+
+# Rótulos dos eventos na base do gráfico, escritos de baixo para cima: ali a curva do
+# TCI nunca chega perto do texto (no topo, o rótulo "Aperto Selic" cobria a curva).
+rotulos_eventos <- function(ymin) {
+  geom_text(data = EVENTOS, aes(x = data, y = ymin, label = label),
+            angle = 90, hjust = 0, vjust = -0.4, size = 2.8, color = "grey30",
+            inherit.aes = FALSE)
+}
 
 # ==============================================================================
 # ── Checagem de diretório de trabalho ───────────────────────────────────────
@@ -251,16 +272,21 @@ if (nrow(relatorio_outliers) > 0) {
 
 # ── Correlação BPAN4 x BPAC11 — diagnóstico do anúncio de incorporação ──────
 if (all(c("BPAN4", "BPAC11") %in% NOMES)) {
+  # O fato relevante do BTG é de 13/10/2025, à noite; 14/10 é o primeiro pregão posterior.
   ANUNCIO_INCORPORACAO <- as.Date("2025-10-14")
   
   # Lê direto do Excel, sem o corte de DATA_FIM: no painel N=8 extensão,
   # DATA_FIM já para um dia antes do anúncio (Seção 1, por desenho, para
   # não contaminar a estimação do VAR) — este diagnóstico precisa enxergar
   # além disso, até perto da deslistagem efetiva (jan/2026).
+  # Fechamento_Hist (preço bruto, sem ajuste) é usado só para a razão de preços,
+  # se a coluna existir na planilha.
   raw_pan <- read_excel(CAMINHO_EXCEL, sheet = "BPAN4")  %>%
-    mutate(Data = as.Date(Data)) %>% select(Data, BPAN4 = Fechamento_Aj) %>% arrange(Data)
+    mutate(Data = as.Date(Data)) %>%
+    select(Data, BPAN4 = Fechamento_Aj, any_of(c(BPAN4_hist = "Fechamento_Hist"))) %>% arrange(Data)
   raw_btg <- read_excel(CAMINHO_EXCEL, sheet = "BPAC11") %>%
-    mutate(Data = as.Date(Data)) %>% select(Data, BPAC11 = Fechamento_Aj) %>% arrange(Data)
+    mutate(Data = as.Date(Data)) %>%
+    select(Data, BPAC11 = Fechamento_Aj, any_of(c(BPAC11_hist = "Fechamento_Hist"))) %>% arrange(Data)
   
   precos <- raw_pan %>%
     inner_join(raw_btg, by = "Data") %>%
@@ -292,52 +318,69 @@ if (all(c("BPAN4", "BPAC11") %in% NOMES)) {
     cat("      últimos", k, "dias:", round(cor_k, 4), "\n")
   }
   
-  # ── Detecção automática do início da convergência ──────────────────────────
-  # Usa uma janela mais curta (10 dias) que reage mais rápido a mudanças de
-  # regime do que a série de 30 dias usada no gráfico principal (corr_roll).
-  # Define o início da convergência como o primeiro pregão em que a
-  # correlação móvel ultrapassa um limiar e se mantém acima dele de forma
-  # sustentada nos pregões seguintes — não um pico isolado de ruído.
-  JANELA_CURTA      <- 10
-  LIMIAR_CONV       <- 0.7
-  DIAS_SUSTENTACAO  <- 10
+  # ── Diagnóstico do dia do anúncio (14/10/2025) ──────────────────────────────
+  # Este dia concentra o salto do Pan, sem contrapartida no BTG, e é ele que derruba
+  # a correlação média pós-anúncio e a correlação móvel enquanto está dentro da janela.
+  # A data em que ele SAI da janela (28/10 numa janela de 10 pregões; 26/11 numa de 30)
+  # é artefato da janela, não evento — por isso este script NÃO procura "início da
+  # convergência" por correlação móvel (versão anterior, que dava 28/10/2025).
+  RELACAO_TROCA <- 0.2128   # unit do BTG por ação preferencial do Pan (fato relevante de 13/10/2025)
+  JANELA_CURTA  <- 10
+  JANELA_ROLL   <- 30
   
   ret_df$corr_curta <- zoo::rollapply(
     ret_df[, c("ret_bpan4", "ret_bpac11")], width = JANELA_CURTA,
     FUN = function(x) cor(x[, 1], x[, 2], use = "complete.obs"),
     by.column = FALSE, align = "right", fill = NA
   )
-  
-  pos_idx <- which(ret_df$Data >= ANUNCIO_INCORPORACAO)
-  data_convergencia <- as.Date(NA)
-  
-  for (i in pos_idx) {
-    if (is.na(ret_df$corr_curta[i]) || ret_df$corr_curta[i] < LIMIAR_CONV) next
-    janela_seguinte <- i:min(i + DIAS_SUSTENTACAO - 1, nrow(ret_df))
-    sustentado <- all(!is.na(ret_df$corr_curta[janela_seguinte])) &&
-      all(ret_df$corr_curta[janela_seguinte] >= LIMIAR_CONV)
-    if (sustentado) {
-      data_convergencia <- ret_df$Data[i]
-      break
-    }
-  }
-  
-  if (!is.na(data_convergencia)) {
-    cat("    Início da convergência (correlação móvel de", JANELA_CURTA, "dias, sustentada por >=",
-        DIAS_SUSTENTACAO, "pregões acima de", LIMIAR_CONV, "):", as.character(data_convergencia), "\n")
-  } else {
-    cat("    Nenhuma data de convergência sustentada identificada com os critérios atuais.\n")
-  }
-  
-  # Série de correlação móvel (30 dias) — só para o gráfico, não para os
-  # números acima.
-  JANELA_ROLL <- 30
   ret_df$corr_roll <- zoo::rollapply(
     ret_df[, c("ret_bpan4", "ret_bpac11")], width = JANELA_ROLL,
     FUN = function(x) cor(x[, 1], x[, 2], use = "complete.obs"),
     by.column = FALSE, align = "right", fill = NA
   )
   
+  i_anu <- which(ret_df$Data == ANUNCIO_INCORPORACAO)
+  stopifnot("O pregão de 14/10/2025 não está na série de retornos" = length(i_anu) == 1)
+  
+  cat("\n  Dia do anúncio (", format(ANUNCIO_INCORPORACAO), "):\n", sep = "")
+  cat("    Retorno logarítmico BPAN4:", round(100 * ret_df$ret_bpan4[i_anu], 2),
+      "% | BPAC11:", round(100 * ret_df$ret_bpac11[i_anu], 2), "%\n")
+  
+  pos_sem_dia  <- pos %>% filter(Data != ANUNCIO_INCORPORACAO)
+  janela_15_27 <- ret_df %>% filter(Data > ANUNCIO_INCORPORACAO, Data <= as.Date("2025-10-27"))
+  cat("    Correlação pós-anúncio COM o dia 14/10:", round(cor(pos$ret_bpan4, pos$ret_bpac11), 3),
+      "(n =", nrow(pos), ")\n")
+  cat("    Correlação pós-anúncio SEM o dia 14/10:",
+      round(cor(pos_sem_dia$ret_bpan4, pos_sem_dia$ret_bpac11), 3), "(n =", nrow(pos_sem_dia), ")\n")
+  cat("    Correlação de 15/10 a 27/10:",
+      round(cor(janela_15_27$ret_bpan4, janela_15_27$ret_bpac11), 3), "(n =", nrow(janela_15_27), ")\n")
+  
+  for (w in c(JANELA_CURTA, JANELA_ROLL)) {
+    col_w <- if (w == JANELA_CURTA) "corr_curta" else "corr_roll"
+    if (i_anu + w <= nrow(ret_df)) {
+      cat("    O pregão de 14/10 deixa a janela de", w, "pregões em", format(ret_df$Data[i_anu + w]),
+          "(correlação móvel de", round(ret_df[[col_w]][i_anu + w - 1], 2), "para",
+          round(ret_df[[col_w]][i_anu + w], 2), ")\n")
+    }
+  }
+  
+  # Razão de preços BPAN4/BPAC11 (fechamento bruto) contra a relação de troca.
+  if (all(c("BPAN4_hist", "BPAC11_hist") %in% names(precos))) {
+    precos$razao <- precos$BPAN4_hist / precos$BPAC11_hist
+    razao_vespera <- tail(precos$razao[precos$Data < ANUNCIO_INCORPORACAO], 1)
+    razao_dia     <- precos$razao[precos$Data == ANUNCIO_INCORPORACAO]
+    razao_pos     <- precos$razao[precos$Data >= ANUNCIO_INCORPORACAO]
+    desvio_pos    <- (razao_pos / RELACAO_TROCA - 1) * 100
+    cat("    Razão BPAN4/BPAC11: véspera", round(razao_vespera, 4), "| 14/10", round(razao_dia, 4),
+        "(", round((razao_dia / RELACAO_TROCA - 1) * 100, 2), "% da relação de troca de", RELACAO_TROCA, ")\n")
+    cat("    Desvio da razão em relação à relação de troca, de 14/10 em diante: média",
+        round(mean(desvio_pos), 2), "% | dentro de ±2% em", sum(abs(desvio_pos) <= 2), "de", length(desvio_pos), "pregões\n")
+  } else {
+    cat("    Coluna Fechamento_Hist ausente na planilha: razão de preços não calculada.\n")
+  }
+  
+  # Série de correlação móvel (30 dias) — só para o gráfico, não para os
+  # números acima. Sem título na imagem: a legenda do LaTeX descreve a figura.
   p_corr_roll <- ret_df %>%
     filter(Data >= as.Date("2025-08-01")) %>%
     ggplot(aes(x = Data, y = corr_roll)) +
@@ -345,9 +388,7 @@ if (all(c("BPAN4", "BPAC11") %in% NOMES)) {
     geom_vline(xintercept = as.numeric(ANUNCIO_INCORPORACAO), linetype = "dashed", color = "grey40") +
     geom_hline(yintercept = 0, linetype = "dotted", color = "grey60") +
     coord_cartesian(ylim = c(-1, 1)) +
-    labs(title = "Correlação móvel de retornos — BPAN4 x BPAC11",
-         subtitle = paste0("Janela de ", JANELA_ROLL, " dias | Linha tracejada: anúncio de incorporação (14/10/2025)"),
-         x = NULL, y = "Correlação") +
+    labs(x = NULL, y = "Correlação") +
     theme_minimal(base_size = 11) +
     theme(plot.background = element_rect(fill = "white", color = NA))
   
@@ -400,16 +441,6 @@ rogers_satchell_overnight <- function(ohlc_mat) {
   attr(out, "parcela_overnight") <- p_on
   out                             # desvio-padrão diário, não anualizado
 }
-
-
-# Apêndice (não usado na especificação principal): Garman-Klass, convenção
-# Diebold-Yilmaz.
-# garman_klass <- function(ohlc_mat) {
-#   O <- as.numeric(ohlc_mat[, "Open"]); H <- as.numeric(ohlc_mat[, "High"])
-#   L <- as.numeric(ohlc_mat[, "Low"]);  C <- as.numeric(ohlc_mat[, "Close"])
-#   sig2 <- 0.5 * (log(H / L))^2 - (2 * log(2) - 1) * (log(C / O))^2
-#   sqrt(pmax(sig2, 0))
-# }
 
 vol_rs <- list()
 contagem_regra <- list()
@@ -488,9 +519,8 @@ cat("\n[7/11] Alinhando painel T×8 e imputando NAs (filtro de Kalman)...\n")
 
 painel_raw <- do.call(merge, c(log_vol, all = TRUE))
 colnames(painel_raw) <- NOMES
-n_imputados <- colSums(is.na(painel_raw))   
 
-cat("\n  NAs por banco (antes da imputação):\n")
+cat("\n  NAs por banco (antes de tirar os dias sem pregão):\n")
 print(colSums(is.na(painel_raw)))
 cat("\n  Distribuição de NAs por dia:\n")
 print(table(rowSums(is.na(painel_raw))))
@@ -498,6 +528,13 @@ print(table(rowSums(is.na(painel_raw))))
 dias_sem_pregao <- rowSums(is.na(painel_raw)) == ncol(painel_raw)
 cat("\n  Dias sem pregão removidos:", sum(dias_sem_pregao), "\n")
 painel_raw <- painel_raw[!dias_sem_pregao, ]
+
+# Contagem de imputados DEPOIS de tirar os dias sem pregão. O primeiro pregão da janela
+# não tem fechamento anterior (NA em todos os bancos) e sai junto com os dias sem pregão,
+# então não conta como imputado; antes, a contagem feita acima incluía esse dia.
+n_imputados <- colSums(is.na(painel_raw))
+cat("\n  NAs por banco a imputar (depois de tirar os dias sem pregão):\n")
+print(n_imputados)
 
 cat("  Imputando NAs com filtro de Kalman (auto.arima)...\n")
 painel_imp <- apply(painel_raw, 2, function(col) {
@@ -603,9 +640,9 @@ if (length(falhas_dfgls) > 0) warning("DF-GLS NÃO rejeitou raiz unitária em: "
 if (length(falhas_pp) > 0)    warning("Phillips-Perron NÃO rejeitou raiz unitária em: ", paste(falhas_pp, collapse=", "))
 if (length(falhas_za) > 0)    warning("Zivot-Andrews NÃO rejeitou raiz unitária em: ", paste(falhas_za, collapse=", "))
 
-cat("\n  Nota: ADF rejeitando e KPSS não rejeitando simultaneamente (comum aqui)\n",
-    "  não é contradição — é a assinatura de memória longa (0 < d < 1), não de\n",
-    "  raiz unitária. Ver coluna GPH_d.\n")
+cat("\n  Nota: ADF rejeitando a raiz unitária e KPSS rejeitando a estacionariedade\n",
+    "  ao mesmo tempo (comum aqui) é a assinatura de memória longa (0 < d < 1):\n",
+    "  nem I(0) nem I(1). Ver coluna GPH_d.\n")
 
 write.csv(resultados_testes, outfile("tabelas/testes_estacionariedade.csv"), row.names = FALSE)
 cat("  Tabela salva em", outfile("tabelas/testes_estacionariedade.csv"), "\n")
@@ -749,12 +786,12 @@ write.csv(data.frame(data = datas_roll, as.data.frame(net_rolling)),
 
 tci_df <- data.frame(data = datas_roll, TCI = as.numeric(tci_rolling))
 
+# Gráfico auxiliar (não entra no texto): rótulos dos eventos na base, como na figura do TVP-VAR.
 p_tci <- ggplot(tci_df, aes(x = data, y = TCI)) +
   geom_line(color = "#2166ac", linewidth = 0.7) +
   geom_vline(data = EVENTOS, aes(xintercept = as.numeric(data)),
              linetype = "dashed", color = "grey40", linewidth = 0.5) +
-  geom_text(data = EVENTOS, aes(x = data, y = max(tci_df$TCI) * 0.97, label = label),
-            angle = 90, hjust = 1, vjust = -0.3, size = 2.8, color = "grey30") +
+  rotulos_eventos(min(tci_df$TCI)) +
   scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
   scale_y_continuous(labels = function(x) paste0(x, "%")) +
   labs(title = "Total Connectedness Index — Sistema Bancário Brasileiro (2019–2025)",
@@ -763,9 +800,10 @@ p_tci <- ggplot(tci_df, aes(x = data, y = TCI)) +
   theme_minimal(base_size = 11) +
   theme(plot.title = element_text(face = "bold", size = 12),
         axis.text.x = element_text(angle = 45, hjust = 1),
-        panel.grid.minor = element_blank())
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "white", color = NA))
 
-ggsave(outfile("graficos/tci_rolling.png"), p_tci, width = 12, height = 5, dpi = 300)
+ggsave(outfile("graficos/tci_rolling.png"), p_tci, width = 12, height = 5, dpi = 300, bg = "white")
 cat("  Gráfico TCI salvo.\n")
 
 net_df <- data.frame(data = datas_roll, as.data.frame(net_rolling)) |>
@@ -789,9 +827,10 @@ p_net <- ggplot(net_df, aes(x = data, y = NET, color = Banco)) +
   theme_minimal(base_size = 10) +
   theme(legend.position = "none", strip.text = element_text(face = "bold"),
         axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
-        panel.grid.minor = element_blank())
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "white", color = NA))
 
-ggsave(outfile("graficos/net_rolling.png"), p_net, width = 14, height = 8, dpi = 300)
+ggsave(outfile("graficos/net_rolling.png"), p_net, width = 14, height = 8, dpi = 300, bg = "white")
 cat("  Gráfico NET salvo.\n")
 
 # ── Figura comparativa: TCI para W = 150, 200, 250 sobrepostos ─────────────
@@ -848,6 +887,8 @@ cores_janela <- c("W = 150" = "#2166ac", "W = 200" = "#b2182b", "W = 250" = "#1a
 teto <- max(tci_comparacao$TCI, na.rm = TRUE)
 eventos_saida$y_label <- teto * c(0.99, 0.90, 0.81)[match(eventos_saida$W, levels(eventos_saida$W))]
 
+# Sem título nem subtítulo dentro da imagem: a legenda do LaTeX explica a faixa cinza e as
+# linhas verticais.
 p_comparacao <- ggplot(tci_comparacao, aes(x = data, y = TCI, color = W)) +
   annotate("rect", xmin = as.Date("2020-03-12"), xmax = as.Date("2020-03-23"),
            ymin = -Inf, ymax = Inf, fill = "grey70", alpha = 0.3) +
@@ -860,19 +901,14 @@ p_comparacao <- ggplot(tci_comparacao, aes(x = data, y = TCI, color = W)) +
   scale_color_manual(values = cores_janela, name = NULL) +
   scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
   scale_y_continuous(labels = function(x) paste0(x, "%"), expand = expansion(mult = c(0.05, 0.1))) +
-  labs(
-    title = "Índice de conectividade total por janela rolante (W = 150, 200, 250)",
-    subtitle = "Faixa cinza: colapso de mar/2020. Linhas verticais: data em que o colapso deixa cada janela — o degrau acompanha W, não o evento.",
-    x = NULL, y = "TCI (%)"
-  ) +
+  labs(x = NULL, y = "TCI (%)") +
   theme_minimal(base_size = 11) +
   theme(
-    plot.title = element_text(face = "bold", size = 12),
-    plot.subtitle = element_text(size = 9, color = "grey30"),
     axis.text.x = element_text(angle = 45, hjust = 1),
     panel.grid.minor = element_blank(),
     legend.position = "top",
-    plot.margin = margin(t = 12, r = 16, b = 10, l = 10)
+    plot.margin = margin(t = 12, r = 16, b = 10, l = 10),
+    plot.background = element_rect(fill = "white", color = NA)
   )
 
 ggsave(outfile("graficos/tci_comparacao_janelas.png"), p_comparacao, width = 12, height = 7, dpi = 300, bg = "white")
@@ -970,7 +1006,7 @@ tvpvar_loglik <- function(Y_mat, p, kappa1, kappa2, t0, beta0, P0, Sigma0) {
 
 # ── Passo 3: grade e verossimilhança preditiva ──────────────────────────────
 grade_k1 <- c(0.94, 0.96, 0.98, 0.99, 0.995, 1.00)
-grade_k2 <- c(0.94, 0.96, 0.99)
+grade_k2 <- c(0.94, 0.96, 0.99, if (ESTENDER_GRADE_K2) 0.995)   # 0,995 só se ESTENDER_GRADE_K2 = TRUE
 
 grade <- expand.grid(kappa1 = grade_k1, kappa2 = grade_k2)
 grade$loglik <- NA_real_
@@ -1006,6 +1042,9 @@ KAPPA1 <- melhor$kappa1
 KAPPA2 <- melhor$kappa2
 cat("\n  Par selecionado: kappa1 =", KAPPA1, ", kappa2 =", KAPPA2,
     "(peso posterior =", round(melhor$peso_post, 4), ")\n")
+if (KAPPA2 == max(grade_k2)) {
+  cat("  AVISO: kappa2 selecionado está no limite superior da grade (", max(grade_k2), ").\n", sep = "")
+}
 
 # ── Passo 5: estimação final via ConnectednessApproach ──────────────────────
 cat("\n  Estimando TVP-VAR final (kappa1 =", KAPPA1, ", kappa2 =", KAPPA2, ")...\n")
@@ -1026,25 +1065,26 @@ write.csv(data.frame(data = index(tci_tvp), TCI = as.numeric(tci_tvp)),
 write.csv(data.frame(data = index(net_tvp), as.data.frame(net_tvp)),
           outfile("tabelas/net_tvpvar.csv"), row.names = FALSE)
 
+# Figura do texto (Figura do TCI do TVP-VAR): sem título na imagem; eventos da Tabela de
+# cronologia, com rótulos na base para não cobrir a curva.
 p_tci_tvp <- ggplot(data.frame(data = index(tci_tvp), TCI = as.numeric(tci_tvp)),
                     aes(x = data, y = TCI)) +
   geom_line(color = "#b2182b", linewidth = 0.7) +
   geom_vline(data = EVENTOS, aes(xintercept = as.numeric(data)),
              linetype = "dashed", color = "grey40", linewidth = 0.5) +
-  geom_text(data = EVENTOS, aes(x = data, y = max(as.numeric(tci_tvp)) * 0.97, label = label),
-            angle = 90, hjust = 1, vjust = -0.3, size = 2.8, color = "grey30") +
+  geom_label(data = EVENTOS, aes(x = data, y = ylab, label = label, hjust = hj),
+             inherit.aes = FALSE, size = 3.6, fill = "white", color = "grey20",
+             label.size = 0, label.padding = unit(0.15, "lines")) +
   scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
   scale_y_continuous(labels = function(x) paste0(x, "%")) +
-  labs(title = "Total Connectedness Index — TVP-VAR (especificação principal)",
-       subtitle = paste0("kappa1 = ", KAPPA1, ", kappa2 = ", KAPPA2,
-                         " | GFEVD H = ", H_HORIZONTE),
-       x = NULL, y = "TCI (%)") +
-  theme_minimal(base_size = 11) +
-  theme(plot.title = element_text(face = "bold", size = 12),
-        axis.text.x = element_text(angle = 45, hjust = 1),
-        panel.grid.minor = element_blank())
+  coord_cartesian(ylim = c(min(as.numeric(tci_tvp)) - 2, 88)) +
+  labs(x = NULL, y = "TCI (%)") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid.minor = element_blank(),
+        plot.background = element_rect(fill = "white", color = NA))
 
-ggsave(outfile("graficos/tci_tvpvar.png"), p_tci_tvp, width = 12, height = 5, dpi = 300)
+ggsave(outfile("graficos/tci_tvpvar.png"), p_tci_tvp, width = 8, height = 4.4, dpi = 300, bg = "white")
 cat("  Gráfico TCI (TVP-VAR) salvo.\n")
 
 
@@ -1167,6 +1207,33 @@ print(metricas_centralidade)
 write.csv(metricas_centralidade, outfile("tabelas/centralidade_fullsample.csv"), row.names = FALSE)
 cat("  Salvo em", outfile("tabelas/centralidade_fullsample.csv"), "\n")
 
+# ── Diagnóstico: as métricas recursivas ordenam os bancos como FROM e TO? ───
+# A Metodologia afirma que o PageRank e o autovetor ordenam como o FROM no grafo original e
+# como o TO no grafo invertido (correlação de postos de Spearman igual a 1 nos quatro casos).
+# Este bloco calcula os quatro números que sustentam a frase; se algum for menor que 1,
+# a frase do texto precisa ser suavizada.
+g_inv <- graph_from_adjacency_matrix(t(adj_full), mode = "directed", weighted = TRUE, diag = FALSE)
+V(g_inv)$name <- NOMES
+eigen_inv    <- igraph::eigen_centrality(g_inv, directed = TRUE)$vector
+pagerank_inv <- igraph::page_rank(g_inv, directed = TRUE, weights = E(g_inv)$weight)$vector
+
+spearman_centralidade <- data.frame(
+  Comparacao = c("PageRank (grafo original) x FROM", "Autovetor (grafo original) x FROM",
+                 "PageRank (grafo invertido) x TO",  "Autovetor (grafo invertido) x TO"),
+  Spearman = round(c(
+    cor(pagerank_full[NOMES], from_grafo[NOMES], method = "spearman"),
+    cor(eigen_full[NOMES],    from_grafo[NOMES], method = "spearman"),
+    cor(pagerank_inv[NOMES],  to_grafo[NOMES],   method = "spearman"),
+    cor(eigen_inv[NOMES],     to_grafo[NOMES],   method = "spearman")
+  ), 4)
+)
+cat("\n  Correlação de postos (Spearman) entre centralidade recursiva e FROM/TO:\n")
+print(spearman_centralidade, row.names = FALSE)
+if (any(spearman_centralidade$Spearman < 1)) {
+  warning("Algum Spearman é menor que 1: a frase da Metodologia ('igual a 1 nos quatro casos') precisa ser ajustada.")
+}
+write.csv(spearman_centralidade, outfile("tabelas/spearman_centralidade.csv"), row.names = FALSE)
+
 # Consolida TO/FROM/NET (Seção 10) com as métricas de centralidade numa
 # tabela só.
 tabela_dy_rede <- merge(tabela_dy, metricas_centralidade, by = "Banco")
@@ -1186,11 +1253,12 @@ cat("  Salvo em", outfile("tabelas/dy_centralidade_fullsample.csv"), "\n")
 # tabela apenas como métricas complementares.
 # Base normativa: Res. CMN 4.553/2017 (segmentação S1-S5) e Res. CMN 4.958/2021,
 # art. 8º, §2º (ACPSistêmico se aplica ao S1).
-# S1: Banco do Brasil, Bradesco, BTG Pactual, Caixa, Itaú, Santander;
-# S2 inclui o Banrisul.
+# S1: Banco do Brasil, Bradesco, BTG Pactual, Caixa, Itaú, Santander.
+# Só o enquadramento no S1 entra no texto; os demais segmentos (S2, S3) não foram conferidos
+# contra a lista oficial do BCB, por isso os bancos fora do S1 aparecem sem rótulo de segmento.
 segmento_bcb <- c(
   ITUB4 = "S1", BBDC4 = "S1", BBAS3 = "S1", SANB11 = "S1", BPAC11 = "S1",
-  BRSR6 = "S2", ABCB4 = "S3", BPAN4 = "S3"
+  BRSR6 = "Fora do S1", ABCB4 = "Fora do S1", BPAN4 = "Fora do S1"
 )
 
 comparacao_dsib <- tabela_dy_rede   # TO, FROM, NET, Eigenvector_in, PageRank
@@ -1200,7 +1268,7 @@ comparacao_dsib <- comparacao_dsib[order(-comparacao_dsib$TO), ]
 comparacao_dsib$Rank_rede_TO <- seq_len(nrow(comparacao_dsib))
 rownames(comparacao_dsib) <- NULL
 
-cat("\n  Confronto: ranking de transmissão (TOi) vs. segmentação prudencial do BCB (S1-S5):\n")
+cat("\n  Confronto: ranking de transmissão (TOi) vs. enquadramento no S1 do BCB:\n")
 print(comparacao_dsib)
 
 write.csv(comparacao_dsib, outfile("tabelas/comparacao_dsib.csv"), row.names = FALSE)
@@ -1214,6 +1282,24 @@ tipo_controle <- c(
   BPAC11 = "Privado nacional (BTG)", BRSR6 = "Público estadual",
   ABCB4 = "Privado estrangeiro", BPAN4 = "Privado nacional (BTG)"
 )
+
+# Para as figuras de rede: no painel N = 7 não há Pan, então o BTG não precisa de categoria
+# própria; a categoria "(BTG)" só existe no painel que inclui o par ligado por controle.
+tipo_plot <- tipo_controle
+if (!"BPAN4" %in% NOMES) tipo_plot["BPAC11"] <- "Privado nacional"
+
+# Mesmas cores da paleta Set2, mas atribuídas por nome: não mudam entre painéis nem entre
+# a figura da amostra completa e a dos subperíodos.
+CORES_CONTROLE <- c(
+  "Privado nacional"       = "#66C2A5",
+  "Privado nacional (BTG)" = "#FC8D62",
+  "Privado estrangeiro"    = "#8DA0CB",
+  "Público federal"        = "#E78AC3",
+  "Público estadual"       = "#A6D854"
+)
+
+# Sufixo dos arquivos de figura de rede (n7 ou n8), igual ao esperado pelo LaTeX.
+SUF <- if (length(NOMES) == 7) "n7" else "n8"
 
 # Porte: grande (Itaú, Bradesco, BB, Santander, BTG) vs. médio (Banrisul,
 # ABC Brasil, Banco Pan).
@@ -1407,8 +1493,9 @@ for (k in seq_along(idx_corte)) {
 cat("  ", nrow(coefs_temporais), "cortes estimados com sucesso.\n")
 
 # Resumo: média da série de coeficientes, % de cortes com sinal positivo, e
-# teste t da média contra zero — é essa média testada, não um corte isolado,
-# que sustenta o argumento.
+# teste t da média contra zero. O teste t trata os cortes mensais como independentes e eles são
+# autocorrelacionados (o TVP-VAR é suave), então o t superestima a evidência e serve só de
+# referência; o que sustenta o argumento é a proporção de cortes com o mesmo sinal.
 resumir_serie <- function(x) {
   x  <- x[!is.na(x)]
   tt <- t.test(x, mu = 0)
@@ -1462,19 +1549,41 @@ ggsave(outfile("graficos/coefs_diadicos_temporais.png"), p_coefs_temporais, widt
 cat("  Gráfico salvo em", outfile("graficos/coefs_diadicos_temporais.png"), "\n")
 
 if ("BTG e Pan" %in% levels(coefs_long$par)) {
-  p_coef_btgpan <- coefs_long %>%
-    filter(par == "BTG e Pan") %>%
-    ggplot(aes(x = data, y = coeficiente)) +
+  serie_btgpan <- coefs_long %>% filter(par == "BTG e Pan")
+  
+  # Regimes da Tabela 13 (as médias saem da própria série, então batem com a tabela)
+  regimes <- data.frame(
+    ini = as.Date(c("2019-01-01", "2021-05-01", "2023-01-01")),
+    fim = as.Date(c("2021-04-30", "2022-12-31", "2025-10-31"))
+  )
+  regimes$media <- mapply(function(a, b) mean(serie_btgpan$coeficiente[serie_btgpan$data >= a & serie_btgpan$data <= b]),
+                          regimes$ini, regimes$fim)
+  regimes$rotulo <- format(round(regimes$media, 2), nsmall = 2, decimal.mark = ",")
+  regimes$meio   <- regimes$ini + (regimes$fim - regimes$ini) / 2
+  
+  p_coef_btgpan <- ggplot(serie_btgpan, aes(x = data, y = coeficiente)) +
+    annotate("rect", xmin = min(serie_btgpan$data), xmax = as.Date("2019-09-30"),
+             ymin = -Inf, ymax = Inf, fill = "grey70", alpha = 0.35) +
+    annotate("text", x = min(serie_btgpan$data), y = Inf, label = "Treino do filtro",
+             hjust = 0, vjust = 1.6, size = 3.4, color = "grey25") +
+    geom_vline(xintercept = as.numeric(as.Date("2021-05-01")), linetype = "dashed", color = "grey30") +
+    geom_vline(xintercept = as.numeric(as.Date("2023-01-01")), linetype = "dotted", color = "grey50") +
+    annotate("text", x = as.Date("2021-05-01"), y = Inf, label = " Controle integral do BTG (mai/2021)",
+             hjust = 0, vjust = 1.6, size = 3.4, color = "grey25") +
     geom_hline(yintercept = 0, linetype = "dashed", color = "grey40", linewidth = 0.4) +
+    geom_segment(data = regimes, aes(x = ini, xend = fim, y = media, yend = media),
+                 inherit.aes = FALSE, color = "#2166ac", linewidth = 1) +
     geom_line(linewidth = 0.8, color = "#b2182b") +
+    geom_label(data = regimes, aes(x = meio, y = media, label = rotulo), inherit.aes = FALSE,
+               size = 3.4, color = "#2166ac", fill = "white", label.size = 0, vjust = -0.3) +
     scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
     labs(x = NULL, y = "Coeficiente (p.p.)") +
-    theme_minimal(base_size = 13) +
+    theme_minimal(base_size = 12) +
     theme(axis.text.x = element_text(angle = 45, hjust = 1),
           panel.grid.minor = element_blank(),
           plot.background = element_rect(fill = "white", color = NA))
   
-  ggsave(outfile("graficos/coef_btgpan_temporal.png"), p_coef_btgpan, width = 9, height = 4.5, dpi = 300, bg = "white")
+  ggsave(outfile("graficos/coef_btgpan_temporal.png"), p_coef_btgpan, width = 8, height = 4.4, dpi = 300, bg = "white")
   cat("  Gráfico salvo em", outfile("graficos/coef_btgpan_temporal.png"), "\n")
 }
 
@@ -1518,7 +1627,7 @@ dist_netij <- data.frame(
   valor = sapply(pares, function(p) abs(npdc[p[1], p[2]]) * 100)
 )
 dist_netij <- dist_netij[order(-dist_netij$valor), ]
-cat("\n  Distribuição de |NETij| entre os 28 pares (p.p.):\n")
+cat("\n  Distribuição de |NETij| entre os", length(pares), "pares (p.p.):\n")
 print(dist_netij, row.names = FALSE)
 cat("\n  Máximo:", round(max(dist_netij$valor), 3),
     "| Mediana:", round(median(dist_netij$valor), 3),
@@ -1541,41 +1650,52 @@ g_net <- graph_from_data_frame(edges_net, directed = TRUE, vertices = data.frame
 
 V(g_net)$TO   <- to_grafo[V(g_net)$name]
 V(g_net)$NET  <- net_grafo[V(g_net)$name]
-V(g_net)$Tipo <- tipo_controle[V(g_net)$name]
+V(g_net)$Tipo <- tipo_plot[V(g_net)$name]
 
 # Layout FR calculado uma vez — reaproveitar fixo nos painéis de subperíodo futuros.
 set.seed(42)
 layout_fr <- create_layout(g_net, layout = "fr")
 
+# Sem título nem subtítulo dentro da imagem: a legenda do LaTeX descreve a figura.
+LARG_IN <- 6.3   # largura útil do texto na ABNT (A4, margens 3/2 cm)
+
 p_rede <- ggraph(layout_fr) +
   geom_edge_link(
     aes(width = weight, alpha = weight),
-    arrow = arrow(length = unit(3, "mm"), type = "closed"),
-    end_cap = circle(6, "mm"), color = "grey40"
+    arrow = arrow(length = unit(2.5, "mm"), type = "closed"),
+    end_cap = circle(4, "mm"), color = "grey40"
   ) +
-  scale_edge_width(range = c(0.3, 2.5), name = "Peso do fluxo (p.p.)") +
-  scale_edge_alpha(range = c(0.4, 0.9), guide = "none") +   # redundante com a espessura, sem legenda própria
-  geom_node_point(aes(size = sqrt(TO), fill = Tipo), shape = 21, color = "black", stroke = 0.6) +
-  scale_size_continuous(range = c(6, 16), name = "TOi (√, p.p.)") +
-  scale_fill_brewer(palette = "Set2", name = "Tipo de controle") +
-  geom_node_text(aes(label = name), vjust = -1.6, size = 4, fontface = "bold") +
-  labs(
-    title = "Rede de conectividade — Sistema Bancário Brasileiro (full sample, 2019-2025)",
-    subtitle = paste0("Arestas: NET par-a-par (Eq. 6.13), threshold relativo ", THRESHOLD_REL * 100,
-                      "% do par mais forte | Tamanho do nó ~ TOi | Layout: Fruchterman-Reingold")
+  scale_edge_width(range = c(0.3, 1.8), name = "|NET| par a par (p.p.)") +
+  scale_edge_alpha(range = c(0.4, 0.9), guide = "none") +
+  geom_node_point(aes(size = sqrt(TO), fill = Tipo), shape = 21, color = "black", stroke = 0.5) +
+  scale_size_continuous(range = c(4, 11), name = "TO (raiz quadrada, p.p.)") +
+  scale_fill_manual(values = CORES_CONTROLE, name = "Tipo de controle", drop = TRUE) +
+  geom_node_text(aes(label = name), vjust = -1.5, size = 3.5, fontface = "bold") +  # 3,5 mm ≈ 10 pt
+  scale_x_continuous(expand = expansion(mult = 0.15)) +
+  scale_y_continuous(expand = expansion(mult = c(0.10, 0.18))) +
+  coord_cartesian(clip = "off") +
+  guides(
+    fill = guide_legend(order = 1, nrow = 2, override.aes = list(size = 5)),
+    size = guide_legend(order = 2, nrow = 1),
+    edge_width = guide_legend(order = 3, nrow = 1)
   ) +
-  theme_void(base_size = 12) +
+  theme_void(base_size = 10) +
   theme(
-    plot.title = element_text(face = "bold", size = 13),
-    plot.subtitle = element_text(size = 10, color = "grey30"),
-    legend.position = "right",
+    legend.position   = "bottom",
+    legend.box        = "vertical",
+    legend.title      = element_text(size = 10, face = "bold"),
+    legend.text       = element_text(size = 9),
+    legend.key.size   = unit(5, "mm"),
+    legend.spacing.y  = unit(1, "mm"),
+    plot.margin       = margin(4, 8, 4, 8),
     plot.background   = element_rect(fill = "white", color = NA),
     panel.background  = element_rect(fill = "white", color = NA),
     legend.background = element_rect(fill = "white", color = NA)
   )
 
-ggsave(outfile("graficos/rede_full_sample.png"), p_rede, width = 11, height = 8, dpi = 300, bg = "white")
-cat("  Grafo salvo em", outfile("graficos/rede_full_sample.png"), "\n")
+arq_rede <- outfile(sprintf("graficos/rede_%s_amostra_completa.png", SUF))
+ggsave(arq_rede, p_rede, width = LARG_IN, height = 6.2, dpi = 300, bg = "white")
+cat("  Grafo salvo em", arq_rede, "\n")
 
 
 # ==============================================================================
@@ -1598,9 +1718,10 @@ SUBPERIODOS <- list(
 coords_fixas <- data.frame(name = layout_fr$name, x = layout_fr$x, y = layout_fr$y)
 stopifnot("Coordenadas fixas não cobrem todos os bancos" = all(NOMES %in% coords_fixas$name))
 
-construir_grafo_subperiodo <- function(data_ini, data_fim, titulo) {
+# 1ª passada: estima cada subperíodo e guarda TO, NET e a matriz de NET par a par.
+estimar_subperiodo <- function(data_ini, data_fim, titulo) {
   Y_sub <- Y[index(Y) >= as.Date(data_ini) & index(Y) <= as.Date(data_fim), ]
-  
+  cat("    [", titulo, "]", nrow(Y_sub), "pregões\n")
   dca_sub <- tryCatch(
     ConnectednessApproach(Y_sub, nlag = P_LAGS, nfore = H_HORIZONTE, window = NULL,
                           corrected = FALSE, model = "VAR"),
@@ -1610,74 +1731,84 @@ construir_grafo_subperiodo <- function(data_ini, data_fim, titulo) {
     cat("    [", titulo, "] falhou ao estimar — pulando.\n")
     return(NULL)
   }
-  
   CT_sub <- dca_sub$CT
   nd_sub <- length(dim(CT_sub))
-  theta_sub <- if (nd_sub == 2) CT_sub
-  else if (nd_sub == 3) CT_sub[, , 1]
-  else CT_sub[, , 1, dim(CT_sub)[4]]
+  theta_sub <- if (nd_sub == 2) CT_sub else if (nd_sub == 3) CT_sub[, , 1] else CT_sub[, , 1, dim(CT_sub)[4]]
   dimnames(theta_sub) <- list(NOMES, NOMES)
   diag(theta_sub) <- 0
-  
   adj_sub  <- t(theta_sub)
   npdc_sub <- adj_sub - theta_sub
-  
   g_dir_sub <- graph_from_adjacency_matrix(adj_sub, mode = "directed", weighted = TRUE, diag = FALSE)
-  to_sub    <- igraph::strength(g_dir_sub, mode = "out") * 100
-  net_sub   <- to_sub - igraph::strength(g_dir_sub, mode = "in") * 100
-  
+  to_sub  <- igraph::strength(g_dir_sub, mode = "out") * 100
+  net_sub <- to_sub - igraph::strength(g_dir_sub, mode = "in") * 100
   pares_sub <- combn(NOMES, 2, simplify = FALSE)
   dist_sub  <- sapply(pares_sub, function(p) abs(npdc_sub[p[1], p[2]]) * 100)
-  corte_sub <- THRESHOLD_REL * max(dist_sub) / 100
-  
-  edges_sub <- do.call(rbind, lapply(pares_sub, function(par) {
+  list(titulo = titulo, data_ini = data_ini, data_fim = data_fim, npdc = npdc_sub,
+       to = to_sub, net = net_sub, pares = pares_sub, max_net = max(dist_sub))
+}
+
+est_sub <- mapply(function(nome, datas) estimar_subperiodo(datas[1], datas[2], nome),
+                  names(SUBPERIODOS), SUBPERIODOS, SIMPLIFY = FALSE)
+est_sub <- Filter(Negate(is.null), est_sub)
+
+# Escalas COMUNS aos quatro painéis, em valor absoluto.
+LIM_NET  <- max(sapply(est_sub, function(e) e$max_net))
+LIM_SIZE <- max(sapply(est_sub, function(e) sqrt(max(e$to))))
+cat("  Escalas comuns: |NET| máximo =", round(LIM_NET, 2), "p.p. | raiz de TO máxima =", round(LIM_SIZE, 2), "\n")
+
+# 2ª passada: desenha. O limiar de visualização (5% do par mais forte) continua sendo de cada painel.
+desenhar_subperiodo <- function(e) {
+  corte_sub <- THRESHOLD_REL * e$max_net / 100
+  edges_sub <- do.call(rbind, lapply(e$pares, function(par) {
     i <- par[1]; j <- par[2]
-    valor <- npdc_sub[i, j]
+    valor <- e$npdc[i, j]
     if (abs(valor) < corte_sub) return(NULL)
     if (valor > 0) data.frame(from = i, to = j, weight = abs(valor) * 100)
     else           data.frame(from = j, to = i, weight = abs(valor) * 100)
   }))
-  
+  cat("    [", e$titulo, "] pares retidos:", nrow(edges_sub), "de", length(e$pares), "\n")
   g_sub <- graph_from_data_frame(edges_sub, directed = TRUE, vertices = data.frame(name = NOMES))
-  V(g_sub)$TO   <- to_sub[V(g_sub)$name]
-  V(g_sub)$NET  <- net_sub[V(g_sub)$name]
-  V(g_sub)$Tipo <- tipo_controle[V(g_sub)$name]
-  
-  # Layout FIXO: coordenadas do full sample, não recalculadas por subperíodo.
+  V(g_sub)$TO   <- e$to[V(g_sub)$name]
+  V(g_sub)$Tipo <- tipo_plot[V(g_sub)$name]
   x_fixo <- coords_fixas$x[match(V(g_sub)$name, coords_fixas$name)]
   y_fixo <- coords_fixas$y[match(V(g_sub)$name, coords_fixas$name)]
   layout_sub <- create_layout(g_sub, layout = "manual", x = x_fixo, y = y_fixo)
-  
   ggraph(layout_sub) +
     geom_edge_link(aes(width = weight), arrow = arrow(length = unit(2, "mm"), type = "closed"),
                    end_cap = circle(4, "mm"), color = "grey40", alpha = 0.7) +
-    scale_edge_width(range = c(0.2, 1.8), guide = "none") +
+    scale_edge_width(range = c(0.2, 1.4), limits = c(0, LIM_NET), name = "|NET| par a par (p.p.)") +
     geom_node_point(aes(size = sqrt(pmax(TO, 0)), fill = Tipo), shape = 21, color = "black", stroke = 0.5) +
-    scale_size_continuous(range = c(4, 10), guide = "none") +
-    scale_fill_brewer(palette = "Set2", guide = "none") +
-    geom_node_text(aes(label = name), size = 2.8, vjust = -1.3) +
-    labs(title = titulo, subtitle = paste0(data_ini, " a ", data_fim)) +
+    scale_size_continuous(range = c(3, 8), limits = c(0, LIM_SIZE), name = "TO (raiz quadrada, p.p.)") +
+    scale_fill_manual(values = CORES_CONTROLE, name = "Tipo de controle", drop = TRUE) +
+    labs(title = e$titulo, subtitle = paste0(e$data_ini, " a ", e$data_fim)) +
+    geom_node_text(aes(label = name), size = 3, vjust = -1.6) +
+    scale_x_continuous(expand = expansion(mult = 0.18)) +
+    scale_y_continuous(expand = expansion(mult = c(0.12, 0.22))) +
+    coord_cartesian(clip = "off") +
+    labs(title = e$titulo, subtitle = paste0(e$data_ini, " a ", e$data_fim)) +
     theme_void(base_size = 9) +
-    theme(plot.title = element_text(face = "bold", size = 10, hjust = 0.5),
-          plot.subtitle = element_text(size = 7, color = "grey40", hjust = 0.5),
-          plot.background = element_rect(fill = "white", color = NA))
+    theme_void(base_size = 9) +
+    theme(plot.title    = element_text(face = "bold", size = 10, hjust = 0.5),
+          plot.subtitle = element_text(size = 8, color = "grey30", hjust = 0.5),
+          plot.background = element_rect(fill = "white", color = NA),
+          plot.margin = margin(4, 10, 4, 10))
 }
 
-paineis_sub <- mapply(
-  function(nome, datas) construir_grafo_subperiodo(datas[1], datas[2], nome),
-  names(SUBPERIODOS), SUBPERIODOS, SIMPLIFY = FALSE
-)
-paineis_sub <- Filter(Negate(is.null), paineis_sub)
+paineis_sub <- lapply(est_sub, desenhar_subperiodo)
 
-p_subperiodos <- wrap_plots(paineis_sub, ncol = 2) +
-  plot_annotation(
-    title = "Rede de conectividade por subperíodo — layout fixo (Fruchterman-Reingold, full sample)",
-    theme = theme(plot.title = element_text(face = "bold", size = 13),
-                  plot.background = element_rect(fill = "white", color = NA))
-  ) & theme(plot.background = element_rect(fill = "white", color = NA))
+# As três legendas (cor, tamanho e espessura) são idênticas nos painéis e coletadas uma única vez.
+p_subperiodos <- wrap_plots(paineis_sub, ncol = 2, guides = "collect") &
+  guides(fill = guide_legend(nrow = 1, override.aes = list(size = 5))) &
+  theme(legend.position = "bottom", legend.box = "vertical",
+        legend.title = element_text(size = 9, face = "bold"),
+        legend.text  = element_text(size = 8.5),
+        legend.key.size = unit(4.5, "mm"),
+        plot.background = element_rect(fill = "white", color = NA))
 
-ggsave(outfile("graficos/rede_subperiodos.png"), p_subperiodos, width = 12, height = 10, dpi = 300, bg = "white")
-cat("  Painel de subperíodos salvo em", outfile("graficos/rede_subperiodos.png"), "(", length(paineis_sub), "de", length(SUBPERIODOS), "subperíodos estimados)\n")
+arq_sub <- outfile(sprintf("graficos/rede_%s_subperiodos.png", SUF))
+ggsave(arq_sub, p_subperiodos, width = LARG_IN, height = 8.6, dpi = 300, bg = "white")
+
+cat("  Painel de subperíodos salvo em", arq_sub, "(", length(paineis_sub), "de", length(SUBPERIODOS), "subperíodos estimados)\n")
 
 
 # ==============================================================================
