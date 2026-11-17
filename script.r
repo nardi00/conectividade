@@ -32,7 +32,7 @@ library(patchwork)
 # Alterna entre os dois painéis
 # Trocar PAINEL e rodar o script de novo — cada painel grava em sua própria
 # subpasta (outputs/N7_principal/, outputs/N8_extensao/), nunca se sobrepõem.
-PAINEL <- "N7_ate_0730"   # N7_principal ou N8_extensao ou N7_ate_0730
+PAINEL <- "N8_extensao"   # N7_principal ou N8_extensao ou N7_ate_0730
 
 CONFIG_PAINEIS <- list(
   N7_principal = list(
@@ -1798,7 +1798,7 @@ paineis_sub <- lapply(est_sub, desenhar_subperiodo)
 
 # As três legendas (cor, tamanho e espessura) são idênticas nos painéis e coletadas uma única vez.
 p_subperiodos <- wrap_plots(paineis_sub, ncol = 2, guides = "collect") &
-  guides(fill = guide_legend(nrow = 1, override.aes = list(size = 5))) &
+  guides(fill = guide_legend(nrow = 2, title.position = "top", override.aes = list(size = 5))) &
   theme(legend.position = "bottom", legend.box = "vertical",
         legend.title = element_text(size = 9, face = "bold"),
         legend.text  = element_text(size = 8.5),
